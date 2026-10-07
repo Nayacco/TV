@@ -20,6 +20,7 @@ jobs:
     outputs:
       build_type: ${{ steps.signing.outputs.build_type }}
       signing_label: ${{ steps.signing.outputs.signing_label }}
+      signing_persistent: ${{ steps.signing.outputs.signing_persistent }}
       fluxdown_sha: ${{ steps.collect.outputs.fluxdown_sha }}
     env:
       NDK_VERSION: "28.2.13676358"
@@ -92,7 +93,7 @@ jobs:
         with:
           tool: cargo-ndk@4.1.2
 
-      - name: Configure APK signing
+      - name: Configure optimized release signing
         id: signing
         shell: bash
         env:
@@ -101,6 +102,7 @@ jobs:
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
           set -euo pipefail
+          umask 077
           signing_values=0
           [[ -n "${ANDROID_KEYSTORE_BASE64}" ]] && signing_values=$((signing_values + 1))
           [[ -n "${ANDROID_KEY_ALIAS}" ]] && signing_values=$((signing_values + 1))
@@ -114,13 +116,29 @@ jobs:
             store_password="${ANDROID_STORE_PASSWORD}"
             build_type="release"
             signing_label="repository release key"
+            signing_persistent="true"
           elif [[ "${signing_values}" -eq 0 ]]; then
-            keystore="${RUNNER_TEMP}/unused-release-key.jks"
-            key_alias="unused"
-            store_password="unused"
-            build_type="debug"
-            signing_label="runner-generated Android debug key"
-            echo "::warning::Signing secrets are not configured; publishing debug APKs."
+            keystore="${RUNNER_TEMP}/ephemeral-release.p12"
+            key_alias="ci-release"
+            store_password="$(openssl rand -hex 24)"
+            export FLUXDOWN_CI_KEY_PASSWORD="${store_password}"
+            keytool -genkeypair \
+              -keystore "${keystore}" \
+              -storetype PKCS12 \
+              -storepass:env FLUXDOWN_CI_KEY_PASSWORD \
+              -keypass:env FLUXDOWN_CI_KEY_PASSWORD \
+              -alias "${key_alias}" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -sigalg SHA256withRSA \
+              -validity 10000 \
+              -dname "CN=Ephemeral CI Build, OU=GitHub Actions"
+            unset FLUXDOWN_CI_KEY_PASSWORD
+            test -s "${keystore}"
+            build_type="release"
+            signing_label="runner-generated ephemeral release key"
+            signing_persistent="false"
+            echo "::warning::Signing secrets are not configured; publishing an optimized release APK signed with a one-run key. It cannot upgrade builds from another run."
           else
             echo "::error::Configure all three signing secrets or remove all of them: ANDROID_KEYSTORE_BASE64, ANDROID_KEY_ALIAS, ANDROID_STORE_PASSWORD."
             exit 1
@@ -149,22 +167,14 @@ jobs:
           echo "SIGNING_LABEL=${signing_label}" >> "${GITHUB_ENV}"
           echo "build_type=${build_type}" >> "${GITHUB_OUTPUT}"
           echo "signing_label=${signing_label}" >> "${GITHUB_OUTPUT}"
+          echo "signing_persistent=${signing_persistent}" >> "${GITHUB_OUTPUT}"
 
-      - name: Build release APKs
-        if: env.BUILD_TYPE == 'release'
+      - name: Build optimized release APKs
         shell: bash
         run: >-
           ./gradlew --no-daemon
           :app:assembleLeanbackRelease
           :app:assembleMobileRelease
-
-      - name: Build debug APKs
-        if: env.BUILD_TYPE == 'debug'
-        shell: bash
-        run: >-
-          ./gradlew --no-daemon
-          :app:assembleLeanbackDebug
-          :app:assembleMobileDebug
 
       - name: Collect and verify APKs
         id: collect
@@ -173,11 +183,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
 
-          if [[ "${BUILD_TYPE}" == "release" ]]; then
-            find Release/apk -maxdepth 1 -type f -name '*.apk' -exec cp '{}' dist/ ';'
-          else
-            find app/build/outputs/apk -type f -path '*/debug/*' -name '*.apk' -exec cp '{}' dist/ ';'
-          fi
+          find Release/apk -maxdepth 1 -type f -name '*.apk' -exec cp '{}' dist/ ';'
 
           mapfile -t apks < <(find dist -maxdepth 1 -type f -name '*.apk' | sort)
           if [[ "${#apks[@]}" -ne 4 ]]; then
@@ -189,7 +195,9 @@ jobs:
           short_sha="${GITHUB_SHA:0:7}"
           for apk in "${apks[@]}"; do
             name="$(basename "${apk}" .apk)"
-            mv "${apk}" "dist/${name}-${short_sha}.apk"
+            output="dist/${name}-${short_sha}.apk"
+            mv "${apk}" "${output}"
+            "${ANDROID_HOME}/build-tools/36.0.0/apksigner" verify --verbose --print-certs "${output}"
           done
 
           (cd dist && sha256sum -- *.apk > SHA256SUMS.txt)
@@ -224,6 +232,7 @@ jobs:
     env:
       BUILD_TYPE: ${{ needs.build.outputs.build_type }}
       SIGNING_LABEL: ${{ needs.build.outputs.signing_label }}
+      SIGNING_PERSISTENT: ${{ needs.build.outputs.signing_persistent }}
       FLUXDOWN_SHA: ${{ needs.build.outputs.fluxdown_sha }}
 
     steps:
@@ -245,10 +254,10 @@ jobs:
           short_sha="${GITHUB_SHA:0:7}"
           title="FluxDown cache ${short_sha}"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          if [[ "${BUILD_TYPE}" == "debug" ]]; then
-            install_note="Debug signing is generated per runner; uninstall an older draft build before installing this one."
-          else
+          if [[ "${SIGNING_PERSISTENT}" == "true" ]]; then
             install_note="Release signing uses the repository signing secrets and supports normal upgrades."
+          else
+            install_note="This optimized release uses a new ephemeral key for this run; uninstall an older draft build before installing this one."
           fi
 
           cat > "${RUNNER_TEMP}/release-notes.md" <<EOF
