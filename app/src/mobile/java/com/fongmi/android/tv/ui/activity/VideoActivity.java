@@ -31,7 +31,6 @@ import androidx.media3.common.C;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
-import androidx.media3.ui.PlayerSeekView;
 import androidx.media3.ui.PlayerView;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.transition.ChangeBounds;
@@ -42,10 +41,8 @@ import com.bumptech.glide.request.transition.Transition;
 import com.fongmi.android.tv.App;
 import com.fongmi.android.tv.Constant;
 import com.fongmi.android.tv.R;
-import com.fongmi.android.tv.api.DanmakuApi;
 import com.fongmi.android.tv.api.SiteApi;
 import com.fongmi.android.tv.api.config.VodConfig;
-import com.fongmi.android.tv.bean.Danmaku;
 import com.fongmi.android.tv.bean.Episode;
 import com.fongmi.android.tv.bean.Flag;
 import com.fongmi.android.tv.bean.History;
@@ -72,10 +69,7 @@ import com.fongmi.android.tv.playback.vod.VodDetailResult;
 import com.fongmi.android.tv.playback.vod.VodPlayRequest;
 import com.fongmi.android.tv.playback.vod.VodPlaybackController;
 import com.fongmi.android.tv.playback.vod.VodPlaybackHost;
-import com.fongmi.android.tv.playback.vod.VodPlaybackMedia;
-import com.fongmi.android.tv.player.media.PlaySpec;
 import com.fongmi.android.tv.service.PlaybackService;
-import com.fongmi.android.tv.setting.DanmakuSetting;
 import com.fongmi.android.tv.setting.PlayerSetting;
 import com.fongmi.android.tv.setting.SpeedSetting;
 import com.fongmi.android.tv.ui.adapter.EpisodeAdapter;
@@ -85,12 +79,10 @@ import com.fongmi.android.tv.ui.adapter.QuickAdapter;
 import com.fongmi.android.tv.ui.base.ViewType;
 import com.fongmi.android.tv.ui.custom.CustomKeyDown;
 import com.fongmi.android.tv.ui.custom.CustomMovement;
+import com.fongmi.android.tv.ui.custom.PlayerSeekView;
 import com.fongmi.android.tv.ui.custom.SpaceItemDecoration;
 import com.fongmi.android.tv.ui.dialog.CastDialog;
-import com.fongmi.android.tv.ui.dialog.ChapterDialog;
 import com.fongmi.android.tv.ui.dialog.ControlDialog;
-import com.fongmi.android.tv.ui.dialog.DanmakuDialog;
-import com.fongmi.android.tv.ui.dialog.EditionDialog;
 import com.fongmi.android.tv.ui.dialog.EpisodeGridDialog;
 import com.fongmi.android.tv.ui.dialog.EpisodeListDialog;
 import com.fongmi.android.tv.ui.dialog.InfoDialog;
@@ -322,7 +314,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         mR3 = this::setOrient;
         mR4 = this::showEmpty;
         mPiP = new PiP();
-        checkDanmakuImg();
         setRecyclerView();
         setVideoView();
         setViewModel();
@@ -353,7 +344,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         mBinding.control.title.setOnLongClickListener(view -> onChange());
         mBinding.control.right.lock.setOnClickListener(view -> onLock());
         mBinding.control.right.rotate.setOnClickListener(view -> onRotate());
-        mBinding.control.danmaku.setOnClickListener(view -> onDanmakuShow());
         mBinding.control.action.text.setOnClickListener(this::onTrack);
         mBinding.control.action.audio.setOnClickListener(this::onTrack);
         mBinding.control.action.video.setOnClickListener(this::onTrack);
@@ -368,9 +358,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         mBinding.control.action.ending.setOnClickListener(view -> onEnding());
         mBinding.control.action.repeat.setOnClickListener(view -> onRepeat());
         mBinding.control.action.opening.setOnClickListener(view -> onOpening());
-        mBinding.control.action.danmaku.setOnClickListener(view -> onDanmaku());
-        mBinding.control.action.edition.setOnClickListener(view -> onEdition());
-        mBinding.control.action.chapter.setOnClickListener(view -> onChapter());
         mBinding.control.action.episodes.setOnClickListener(view -> onEpisodes());
         mBinding.control.action.speed.setOnLongClickListener(view -> onSpeedLong());
         mBinding.control.action.ending.setOnLongClickListener(view -> onEndingReset());
@@ -406,7 +393,10 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
 
     private void setVideoView() {
         PlayerEngineDialog.setText(mBinding.control.action.player);
-        mBinding.control.action.danmaku.setVisibility(DanmakuSetting.isLoad() ? View.VISIBLE : View.GONE);
+        mBinding.control.danmaku.setVisibility(View.GONE);
+        mBinding.control.action.danmaku.setVisibility(View.GONE);
+        mBinding.control.action.edition.setVisibility(View.GONE);
+        mBinding.control.action.chapter.setVisibility(View.GONE);
         mBinding.video.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> mPiP.update(this, view));
     }
 
@@ -437,7 +427,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         mVod = mViewModel.createPlaybackController(this);
         observeWhenServiceReady(mViewModel.getDetail(), this::onDetailObserved);
         observeWhenServiceReady(mViewModel.getSearch(), this::onSearchObserved);
-        observeWhenServiceReady(mViewModel.getPreload(), this::onPreloadObserved);
         observeWhenServiceReady(mViewModel.getPlayback(), this::onPlaybackObserved);
     }
 
@@ -447,10 +436,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
 
     private void onPlaybackObserved(PlaybackResult<VodPlayRequest> result) {
         mVod.onPlaybackResult(result);
-    }
-
-    private void onPreloadObserved(PlaybackResult<VodPlayRequest> result) {
-        mVod.onPreloadResult(result);
     }
 
     private void onSearchObserved(Result result) {
@@ -524,11 +509,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
     }
 
     @Override
-    public boolean canPreloadNext() {
-        return service() != null && isOwner() && player().canPreloadNext();
-    }
-
-    @Override
     public long getPlayerPosition() {
         return player().getPosition();
     }
@@ -586,21 +566,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
     @Override
     public void startPlayback(Result result, boolean useParse, long startPositionMs, MediaMetadata metadata) {
         startPlayer(getHistoryKey(), result, useParse, getSite().getTimeout(), startPositionMs, metadata);
-    }
-
-    @Override
-    public boolean preloadPlayback(Result result, long startPositionMs, MediaMetadata metadata) {
-        return player().preload(PlaySpec.from(result, getHistoryKey(), metadata), startPositionMs);
-    }
-
-    @Override
-    public void clearPreload() {
-        if (service() != null && isOwner()) player().clearPreload();
-    }
-
-    @Override
-    public void loadDanmaku(Result result, History history, Episode episode) {
-        VodPlaybackMedia.searchDanmaku(result, history, episode, player()::setDanmaku, player()::addDanmaku);
     }
 
     @Override
@@ -1008,27 +973,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         hideControl();
     }
 
-    private void onEdition() {
-        EditionDialog.create().player(player()).show(this);
-        hideControl();
-    }
-
-    private void onChapter() {
-        ChapterDialog.create().player(player()).show(this);
-        hideControl();
-    }
-
-    private void onDanmaku() {
-        DanmakuDialog.create().player(player()).show(this);
-        hideControl();
-    }
-
-    private void onDanmakuShow() {
-        DanmakuSetting.putShow(!DanmakuSetting.isShow());
-        checkDanmakuImg();
-        syncDanmakuEnabled();
-    }
-
     private void onRepeat() {
         player().setRepeatOne(!player().isRepeatOne());
         mBinding.control.action.repeat.setSelected(player().isRepeatOne());
@@ -1204,17 +1148,8 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         mBinding.widget.error.setText("");
     }
 
-    private void syncDanmakuEnabled() {
-        player().setDanmakuEnabled(DanmakuSetting.isShow());
-    }
-
-    private void hideDanmaku() {
-        player().setDanmakuEnabled(false);
-    }
-
     private void showControl() {
         if (service() == null || isInPictureInPictureMode()) return;
-        mBinding.control.danmaku.setVisibility(isLock() || !player().haveDanmaku() ? View.GONE : View.VISIBLE);
         mBinding.control.setting.setVisibility(mHistory == null || isFullscreen() ? View.GONE : View.VISIBLE);
         mBinding.control.right.rotate.setVisibility(isFullscreen() && !isLock() ? View.VISIBLE : View.GONE);
         mBinding.control.keep.setVisibility(mHistory == null || isFullscreen() ? View.GONE : View.VISIBLE);
@@ -1300,10 +1235,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         mBinding.control.right.lock.setImageResource(isLock() ? R.drawable.ic_control_lock_on : R.drawable.ic_control_lock_off);
     }
 
-    private void checkDanmakuImg() {
-        mBinding.control.danmaku.setImageResource(DanmakuSetting.isShow() ? R.drawable.ic_control_danmaku_on : R.drawable.ic_control_danmaku_off);
-    }
-
     private void createKeep() {
         Keep keep = new Keep();
         keep.setKey(getHistoryKey());
@@ -1371,11 +1302,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
     @Override
     protected void onTracksChanged() {
         setTrackVisible();
-    }
-
-    @Override
-    protected void onMediaOptionsChanged() {
-        setMediaOptionVisible();
     }
 
     @Override
@@ -1449,7 +1375,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         else if (event.getType() == RefreshEvent.Type.PLAYER) mVod.refresh();
         else if (event.getType() == RefreshEvent.Type.VOD) mVod.updateVod(event.getVod());
         else if (event.getType() == RefreshEvent.Type.SUBTITLE) player().setSub(Sub.from(event.getPath()));
-        else if (event.getType() == RefreshEvent.Type.DANMAKU) player().setDanmaku(Danmaku.from(event.getPath()));
     }
 
     @Override
@@ -1486,10 +1411,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
 
     private void setTrackVisible() {
         PlaybackAction.setTracks(player(), mBinding.control.action.text, mBinding.control.action.audio, mBinding.control.action.video);
-    }
-
-    private void setMediaOptionVisible() {
-        PlaybackAction.setMediaOptions(player(), mBinding.control.action.edition, mBinding.control.action.chapter);
     }
 
     private void onPaused() {
@@ -1661,12 +1582,10 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         if (!isFullscreen()) setVideoView(true);
         dismissDialogs();
         hideControl();
-        hideDanmaku();
     }
 
     private void onExitPictureInPicture() {
         if (!isFullscreen()) setVideoView(false);
-        syncDanmakuEnabled();
         if (isStop()) finish();
     }
 
@@ -1718,7 +1637,6 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         mClock.release();
         saveHistory(true);
         Timer.get().reset();
-        DanmakuApi.cancel();
         RefreshEvent.keep();
         App.removeCallbacks(mR1, mR2, mR3, mR4);
         super.onDestroy();

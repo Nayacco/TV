@@ -52,22 +52,15 @@ public final class PlayerEngineDialog extends BaseBottomSheetDialog {
     @Override
     protected void initView() {
         setSelected();
+        binding.debug.setVisibility(View.GONE);
+        binding.mpv.setVisibility(View.GONE);
         getSelectedView().requestFocus();
     }
 
     @Override
     protected void initEvent() {
-        binding.debug.setOnClickListener(this::selectDebug);
         binding.other.setOnClickListener(this::selectOther);
         binding.exo.setOnClickListener(view -> selectEngine(PlayerSetting.ENGINE_EXO));
-        binding.mpv.setOnClickListener(view -> selectEngine(PlayerSetting.ENGINE_MPV));
-    }
-
-    private void selectDebug(View view) {
-        PlaybackActivity activity = getPlaybackActivity();
-        if (activity == null) return;
-        activity.toggleDebugView();
-        dismiss();
     }
 
     private void selectOther(View view) {
@@ -90,7 +83,7 @@ public final class PlayerEngineDialog extends BaseBottomSheetDialog {
     }
 
     private View getSelectedView() {
-        return getCurrentEngine(player) == PlayerSetting.ENGINE_MPV ? binding.mpv : binding.exo;
+        return binding.exo;
     }
 
     private PlaybackActivity getPlaybackActivity() {

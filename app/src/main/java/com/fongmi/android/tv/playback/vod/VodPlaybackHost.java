@@ -42,8 +42,6 @@ public interface VodPlaybackHost {
 
     boolean canTrackPlaybackProgress();
 
-    boolean canPreloadNext();
-
     long getPlayerPosition();
 
     long getPlayerDuration();
@@ -61,12 +59,6 @@ public interface VodPlaybackHost {
     void replay(long position);
 
     void startPlayback(Result result, boolean useParse, long startPositionMs, MediaMetadata metadata);
-
-    boolean preloadPlayback(Result result, long startPositionMs, MediaMetadata metadata);
-
-    void clearPreload();
-
-    void loadDanmaku(Result result, History history, Episode episode);
 
     void renderDetail(Vod item, History history);
 

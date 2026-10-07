@@ -86,7 +86,7 @@ android {
 AbiApkPackaging.configure(project, SingleArtifact.APK.INSTANCE)
 
 dependencies {
-    implementation fileTree(dir: "libs", include: ["*.aar"])
+    implementation fileTree(dir: "libs", include: ["*.aar"], exclude: ["lib-*.aar"])
     implementation project(':catvod')
     implementation project(':chaquo')
     implementation project(':quickjs')
@@ -94,6 +94,7 @@ dependencies {
     implementation libs.appcompat
     implementation libs.lifecycle.service
     implementation libs.media
+    implementation libs.bundles.media3
     implementation libs.palette
     implementation libs.recyclerview
     implementation libs.room.runtime

@@ -12,7 +12,6 @@ import androidx.media3.ui.SubtitleView;
 import androidx.viewbinding.ViewBinding;
 
 import com.fongmi.android.tv.databinding.DialogSubtitleSettingBinding;
-import com.fongmi.android.tv.player.PlayerManager;
 import com.fongmi.android.tv.player.subtitle.ExternalFont;
 import com.fongmi.android.tv.utils.ResUtil;
 import com.fongmi.android.tv.utils.Util;
@@ -20,7 +19,6 @@ import com.fongmi.android.tv.utils.Util;
 public final class SubtitleSettingDialog {
 
     private SubtitleView subtitleView;
-    private PlayerManager player;
 
     public static SubtitleSettingDialog create() {
         return new SubtitleSettingDialog();
@@ -35,29 +33,22 @@ public final class SubtitleSettingDialog {
         return this;
     }
 
-    public SubtitleSettingDialog player(PlayerManager player) {
-        this.player = player;
-        return this;
-    }
-
     public void show(FragmentActivity activity) {
         FragmentManager manager = activity.getSupportFragmentManager();
         for (Fragment fragment : manager.getFragments()) if (fragment instanceof BottomSheet || fragment instanceof SideSheet) return;
-        if (Util.isFullscreenLand(activity) || Util.isLeanback()) new SideSheet(subtitleView, player).show(manager, null);
-        else new BottomSheet(subtitleView, player).show(manager, null);
+        if (Util.isFullscreenLand(activity) || Util.isLeanback()) new SideSheet(subtitleView).show(manager, null);
+        else new BottomSheet(subtitleView).show(manager, null);
     }
 
     public static final class BottomSheet extends BaseBottomSheetDialog {
 
         private final SubtitleView subtitleView;
-        private final PlayerManager player;
         private final ExternalFontSelector fontSelector = new ExternalFontSelector(this, this::onFontSelected);
         private DialogSubtitleSettingBinding binding;
         private SubtitleSettingPanel panel;
 
-        BottomSheet(SubtitleView subtitleView, PlayerManager player) {
+        BottomSheet(SubtitleView subtitleView) {
             this.subtitleView = subtitleView;
-            this.player = player;
         }
 
         @Override
@@ -72,7 +63,7 @@ public final class SubtitleSettingDialog {
 
         @Override
         protected void initView() {
-            panel = new SubtitleSettingPanel(binding, subtitleView, player, fontSelector);
+            panel = new SubtitleSettingPanel(binding, subtitleView, fontSelector);
             panel.bind();
         }
 
@@ -98,14 +89,12 @@ public final class SubtitleSettingDialog {
     public static final class SideSheet extends BaseSideSheetDialog {
 
         private final SubtitleView subtitleView;
-        private final PlayerManager player;
         private final ExternalFontSelector fontSelector = new ExternalFontSelector(this, this::onFontSelected);
         private DialogSubtitleSettingBinding binding;
         private SubtitleSettingPanel panel;
 
-        SideSheet(SubtitleView subtitleView, PlayerManager player) {
+        SideSheet(SubtitleView subtitleView) {
             this.subtitleView = subtitleView;
-            this.player = player;
         }
 
         @Override
@@ -120,7 +109,7 @@ public final class SubtitleSettingDialog {
 
         @Override
         protected void initView() {
-            panel = new SubtitleSettingPanel(binding, subtitleView, player, fontSelector);
+            panel = new SubtitleSettingPanel(binding, subtitleView, fontSelector);
             panel.bind();
         }
 

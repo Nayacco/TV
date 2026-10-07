@@ -84,7 +84,7 @@ public final class TrackDialog extends BaseBottomSheetDialog implements TrackAda
     }
 
     private boolean hasSetting() {
-        return type == C.TRACK_TYPE_AUDIO || type == C.TRACK_TYPE_VIDEO || type == C.TRACK_TYPE_TEXT;
+        return type == C.TRACK_TYPE_TEXT;
     }
 
     @Override
@@ -135,11 +135,7 @@ public final class TrackDialog extends BaseBottomSheetDialog implements TrackAda
     }
 
     private void showSetting(FragmentActivity activity) {
-        switch (type) {
-            case C.TRACK_TYPE_AUDIO -> AudioSettingDialog.create().player(player).show(activity);
-            case C.TRACK_TYPE_VIDEO -> VideoSettingDialog.create().player(player).show(activity);
-            case C.TRACK_TYPE_TEXT -> SubtitleSettingDialog.create().view(subtitleView).player(player).show(activity);
-        }
+        if (type == C.TRACK_TYPE_TEXT) SubtitleSettingDialog.create().view(subtitleView).show(activity);
     }
 
     private List<Track> getTrack() {

@@ -2,7 +2,6 @@ package com.fongmi.android.tv.service;
 
 import android.app.PendingIntent;
 import android.content.Intent;
-import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -23,7 +22,6 @@ import androidx.media3.session.SessionCommand;
 import androidx.media3.session.SessionCommands;
 import androidx.media3.session.SessionError;
 import androidx.media3.session.SessionResult;
-import androidx.media3.ui.danmaku.DanmakuConfig;
 
 import com.fongmi.android.tv.App;
 import com.fongmi.android.tv.BuildConfig;
@@ -196,7 +194,6 @@ public class PlaybackService extends MediaLibraryService implements MediaLibrary
 
     private void stopAndClear() {
         player.stop();
-        player.clearPreload();
         player.clearMediaItems();
     }
 
@@ -490,7 +487,6 @@ public class PlaybackService extends MediaLibraryService implements MediaLibrary
 
     @Override
     public void onMediaOptionsChanged() {
-        playerCallbacks.forEach(PlayerCallback::onMediaOptionsChanged);
     }
 
     @Override
@@ -505,26 +501,6 @@ public class PlaybackService extends MediaLibraryService implements MediaLibrary
         sessionPlayer.addListener(listener);
         if (session != null) session.setPlayer(wrap(newPlayer));
         playerCallbacks.forEach(callback -> callback.onPlayerRebuild(newPlayer));
-    }
-
-    @Override
-    public void onDanmakuSourceChanged(@Nullable Uri uri) {
-        playerCallbacks.forEach(callback -> callback.onDanmakuSourceChanged(uri));
-    }
-
-    @Override
-    public void onDanmakuConfigChanged(DanmakuConfig config) {
-        playerCallbacks.forEach(callback -> callback.onDanmakuConfigChanged(config));
-    }
-
-    @Override
-    public void onDanmakuEnabledChanged(boolean enabled) {
-        playerCallbacks.forEach(callback -> callback.onDanmakuEnabledChanged(enabled));
-    }
-
-    @Override
-    public void onDanmakuSent(String text) {
-        playerCallbacks.forEach(callback -> callback.onDanmakuSent(text));
     }
 
     private final Player.Listener listener = new Player.Listener() {
@@ -600,26 +576,12 @@ public class PlaybackService extends MediaLibraryService implements MediaLibrary
         default void onDecodeChanged() {
         }
 
-        default void onMediaOptionsChanged() {
-        }
-
         default void onError(String msg) {
         }
 
         default void onPlayerRebuild(Player player) {
         }
 
-        default void onDanmakuSourceChanged(@Nullable Uri uri) {
-        }
-
-        default void onDanmakuConfigChanged(DanmakuConfig config) {
-        }
-
-        default void onDanmakuEnabledChanged(boolean enabled) {
-        }
-
-        default void onDanmakuSent(String text) {
-        }
     }
 
     public interface NavigationCallback {

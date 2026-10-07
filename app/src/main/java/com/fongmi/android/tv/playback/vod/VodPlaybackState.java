@@ -23,8 +23,6 @@ public class VodPlaybackState {
     private VodPlayRequest pendingRequest;
     private VodPlayRequest playingRequest;
     private MediaMetadata playbackMetadata;
-    private VodPlayRequest preloadRequest;
-    private Result preloadResult;
     private Result quality;
     private History history;
     private String detailKey;
@@ -51,7 +49,6 @@ public class VodPlaybackState {
         flags.clear();
         clearPlayRequest();
         playbackMetadata = null;
-        clearPreload();
         quality = Result.empty();
         history = null;
         detailKey = "";
@@ -203,38 +200,6 @@ public class VodPlaybackState {
     void clearPlayRequest() {
         pendingRequest = null;
         playingRequest = null;
-    }
-
-    @Nullable
-    VodPlayRequest getPreloadRequest() {
-        return preloadRequest;
-    }
-
-    @Nullable
-    Result getPreloadResult() {
-        return preloadResult;
-    }
-
-    void beginPreload(VodPlayRequest request) {
-        preloadRequest = request;
-        preloadResult = null;
-    }
-
-    void completePreload(Result result) {
-        preloadResult = result;
-    }
-
-    @Nullable
-    Result consumePreload(String key, Flag flag, Episode episode) {
-        if (preloadRequest == null || preloadResult == null || !preloadRequest.matches(key, flag, episode)) return null;
-        Result result = preloadResult;
-        clearPreload();
-        return result;
-    }
-
-    void clearPreload() {
-        preloadRequest = null;
-        preloadResult = null;
     }
 
     @Nullable

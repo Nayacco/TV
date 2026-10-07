@@ -16,7 +16,6 @@ import com.fongmi.android.tv.bean.Drm;
 import com.fongmi.android.tv.bean.Sub;
 import com.fongmi.android.tv.player.track.LangUtil;
 import com.fongmi.android.tv.player.track.TrackUtil;
-import com.fongmi.android.tv.setting.Setting;
 import com.fongmi.android.tv.utils.ImgUtil;
 import com.fongmi.android.tv.utils.ResUtil;
 
@@ -59,7 +58,6 @@ public final class MediaItemFactory {
                 .setDrmConfiguration(buildDrmConfig(spec.getDrm()))
                 .setRequestMetadata(buildRequestMetadata(spec))
                 .setMediaMetadata(spec.getMetadata())
-                .setAdblock(Setting.isAdblock())
                 .setMimeType(spec.getFormat())
                 .setImageDurationMs(15000)
                 .setMediaId(spec.getKey());

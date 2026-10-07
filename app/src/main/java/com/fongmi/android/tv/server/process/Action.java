@@ -56,7 +56,6 @@ public class Action implements Process {
             case "setting" -> onSetting(params);
             case "refresh" -> onRefresh(params);
             case "control" -> onControl(params);
-            case "danmaku" -> onDanmaku(params);
         }
     }
 
@@ -116,13 +115,6 @@ public class Action implements Process {
             case "repeat" -> App.post(service::dispatchRepeat);
             case "replay" -> App.post(service::dispatchReplay);
         }
-    }
-
-    private void onDanmaku(Map<String, String> params) {
-        String text = params.get("text");
-        PlaybackService service = Server.get().getService();
-        if (service == null || TextUtils.isEmpty(text)) return;
-        App.post(() -> service.player().sendDanmaku(text));
     }
 
     private void onCast(Map<String, String> params) {

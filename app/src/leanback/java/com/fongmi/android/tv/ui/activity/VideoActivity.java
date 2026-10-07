@@ -23,7 +23,6 @@ import androidx.media3.common.C;
 import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Player;
 import androidx.media3.common.VideoSize;
-import androidx.media3.ui.PlayerSeekView;
 import androidx.media3.ui.PlayerView;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.viewbinding.ViewBinding;
@@ -32,10 +31,8 @@ import com.bumptech.glide.request.transition.Transition;
 import com.fongmi.android.tv.App;
 import com.fongmi.android.tv.Constant;
 import com.fongmi.android.tv.R;
-import com.fongmi.android.tv.api.DanmakuApi;
 import com.fongmi.android.tv.api.SiteApi;
 import com.fongmi.android.tv.api.config.VodConfig;
-import com.fongmi.android.tv.bean.Danmaku;
 import com.fongmi.android.tv.bean.Episode;
 import com.fongmi.android.tv.bean.Flag;
 import com.fongmi.android.tv.bean.History;
@@ -60,10 +57,7 @@ import com.fongmi.android.tv.playback.vod.VodDetailResult;
 import com.fongmi.android.tv.playback.vod.VodPlayRequest;
 import com.fongmi.android.tv.playback.vod.VodPlaybackController;
 import com.fongmi.android.tv.playback.vod.VodPlaybackHost;
-import com.fongmi.android.tv.playback.vod.VodPlaybackMedia;
-import com.fongmi.android.tv.player.media.PlaySpec;
 import com.fongmi.android.tv.service.PlaybackService;
-import com.fongmi.android.tv.setting.DanmakuSetting;
 import com.fongmi.android.tv.setting.PlayerSetting;
 import com.fongmi.android.tv.setting.SpeedSetting;
 import com.fongmi.android.tv.ui.adapter.ArrayAdapter;
@@ -74,10 +68,8 @@ import com.fongmi.android.tv.ui.adapter.QualityAdapter;
 import com.fongmi.android.tv.ui.adapter.QuickAdapter;
 import com.fongmi.android.tv.ui.custom.CustomKeyDownVod;
 import com.fongmi.android.tv.ui.custom.CustomMovement;
-import com.fongmi.android.tv.ui.dialog.ChapterDialog;
+import com.fongmi.android.tv.ui.custom.PlayerSeekView;
 import com.fongmi.android.tv.ui.dialog.ContentDialog;
-import com.fongmi.android.tv.ui.dialog.DanmakuDialog;
-import com.fongmi.android.tv.ui.dialog.EditionDialog;
 import com.fongmi.android.tv.ui.dialog.ParseDialog;
 import com.fongmi.android.tv.ui.dialog.PlayerEngineDialog;
 import com.fongmi.android.tv.ui.dialog.SpeedSettingDialog;
@@ -332,9 +324,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
         mBinding.control.action.decode.setOnClickListener(view -> onDecode());
         mBinding.control.action.ending.setOnClickListener(view -> onEnding());
         mBinding.control.action.repeat.setOnClickListener(view -> onRepeat());
-        mBinding.control.action.danmaku.setOnClickListener(view -> onDanmaku());
-        mBinding.control.action.edition.setOnClickListener(view -> onEdition());
-        mBinding.control.action.chapter.setOnClickListener(view -> onChapter());
         mBinding.control.action.opening.setOnClickListener(view -> onOpening());
         mBinding.control.action.speed.setOnLongClickListener(view -> onSpeedLong());
         mBinding.control.action.ending.setOnLongClickListener(view -> onEndingReset());
@@ -385,7 +374,9 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
         setSeekNextFocusDown(R.id.next);
         setActionFocusBoundary(mBinding.control.action.getRoot());
         PlayerEngineDialog.setText(mBinding.control.action.player);
-        mBinding.control.action.danmaku.setVisibility(DanmakuSetting.isLoad() ? View.VISIBLE : View.GONE);
+        mBinding.control.action.danmaku.setVisibility(View.GONE);
+        mBinding.control.action.edition.setVisibility(View.GONE);
+        mBinding.control.action.chapter.setVisibility(View.GONE);
     }
 
     private void setPlaybackMode() {
@@ -397,7 +388,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
         mVod = mViewModel.createPlaybackController(this);
         observeWhenServiceReady(mViewModel.getDetail(), this::onDetailObserved);
         observeWhenServiceReady(mViewModel.getSearch(), this::onSearchObserved);
-        observeWhenServiceReady(mViewModel.getPreload(), this::onPreloadObserved);
         observeWhenServiceReady(mViewModel.getPlayback(), this::onPlaybackObserved);
     }
 
@@ -407,10 +397,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
 
     private void onPlaybackObserved(PlaybackResult<VodPlayRequest> result) {
         mVod.onPlaybackResult(result);
-    }
-
-    private void onPreloadObserved(PlaybackResult<VodPlayRequest> result) {
-        mVod.onPreloadResult(result);
     }
 
     private void onSearchObserved(Result result) {
@@ -484,11 +470,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
     }
 
     @Override
-    public boolean canPreloadNext() {
-        return service() != null && isOwner() && player().canPreloadNext();
-    }
-
-    @Override
     public long getPlayerPosition() {
         return player().getPosition();
     }
@@ -541,21 +522,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
     @Override
     public void startPlayback(Result result, boolean useParse, long startPositionMs, MediaMetadata metadata) {
         startPlayer(getHistoryKey(), result, useParse, getSite().getTimeout(), startPositionMs, metadata);
-    }
-
-    @Override
-    public boolean preloadPlayback(Result result, long startPositionMs, MediaMetadata metadata) {
-        return player().preload(PlaySpec.from(result, getHistoryKey(), metadata), startPositionMs);
-    }
-
-    @Override
-    public void clearPreload() {
-        if (service() != null && isOwner()) player().clearPreload();
-    }
-
-    @Override
-    public void loadDanmaku(Result result, History history, Episode episode) {
-        VodPlaybackMedia.searchDanmaku(result, history, episode, player()::setDanmaku, player()::addDanmaku);
     }
 
     @Override
@@ -1064,21 +1030,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
         hideControl();
     }
 
-    private void onEdition() {
-        EditionDialog.create().player(player()).show(this);
-        hideControl();
-    }
-
-    private void onChapter() {
-        ChapterDialog.create().player(player()).show(this);
-        hideControl();
-    }
-
-    private void onDanmaku() {
-        DanmakuDialog.create().player(player()).show(this);
-        hideControl();
-    }
-
     private void onToggle() {
         if (isVisible(mBinding.control.getRoot())) hideControl();
         else showControl(getFocus2());
@@ -1257,11 +1208,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
     }
 
     @Override
-    protected void onMediaOptionsChanged() {
-        setMediaOptionVisible();
-    }
-
-    @Override
     protected void onError(String msg) {
         mVod.playbackError(msg);
     }
@@ -1322,7 +1268,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
         else if (event.getType() == RefreshEvent.Type.PLAYER) mVod.refresh();
         else if (event.getType() == RefreshEvent.Type.VOD) mVod.updateVod(event.getVod());
         else if (event.getType() == RefreshEvent.Type.SUBTITLE) player().setSub(Sub.from(event.getPath()));
-        else if (event.getType() == RefreshEvent.Type.DANMAKU) player().setDanmaku(Danmaku.from(event.getPath()));
     }
 
     @Override
@@ -1332,10 +1277,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
 
     private void setTrackVisible() {
         PlaybackAction.setTracks(player(), mBinding.control.action.text, mBinding.control.action.audio, mBinding.control.action.video);
-    }
-
-    private void setMediaOptionVisible() {
-        PlaybackAction.setMediaOptions(player(), mBinding.control.action.edition, mBinding.control.action.chapter);
     }
 
     @Override
@@ -1504,7 +1445,6 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
     protected void onDestroy() {
         mClock.release();
         saveHistory(true);
-        DanmakuApi.cancel();
         RefreshEvent.keep();
         App.removeCallbacks(mR1, mR2, mR3, mR4);
         super.onDestroy();

@@ -4,7 +4,6 @@ import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
-import android.net.Uri;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.view.View;
@@ -24,11 +23,8 @@ import androidx.media3.common.VideoSize;
 import androidx.media3.exoplayer.drm.FrameworkMediaDrm;
 import androidx.media3.session.MediaController;
 import androidx.media3.session.SessionToken;
-import androidx.media3.ui.PlayerSeekView;
 import androidx.media3.ui.PlayerView;
 import androidx.media3.ui.TimeBar;
-import androidx.media3.ui.danmaku.DanmakuConfig;
-import androidx.media3.ui.danmaku.DanmakuPlayerViewController;
 
 import com.fongmi.android.tv.R;
 import com.fongmi.android.tv.bean.Result;
@@ -36,12 +32,10 @@ import com.fongmi.android.tv.playback.PlaybackIntent;
 import com.fongmi.android.tv.player.PlayerManager;
 import com.fongmi.android.tv.player.media.PlaySpec;
 import com.fongmi.android.tv.service.PlaybackService;
-import com.fongmi.android.tv.setting.DanmakuSetting;
-import com.fongmi.android.tv.setting.PlayerSetting;
 import com.fongmi.android.tv.setting.SubtitleSetting;
 import com.fongmi.android.tv.ui.base.BaseActivity;
+import com.fongmi.android.tv.ui.custom.PlayerSeekView;
 import com.fongmi.android.tv.utils.ResUtil;
-import com.github.catvod.net.OkHttp;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.util.ArrayList;
@@ -51,7 +45,6 @@ import java.util.concurrent.TimeUnit;
 
 public abstract class PlaybackActivity extends BaseActivity implements MediaController.Listener, Player.Listener, ServiceConnection {
 
-    private final DanmakuPlayerViewController danmakuController = new DanmakuPlayerViewController();
     private final List<ServiceReadyObserver<?>> serviceReadyObservers = new ArrayList<>();
     private final List<Runnable> foreverObserverRemovers = new ArrayList<>();
     private ListenableFuture<MediaController> mControllerFuture;
@@ -150,11 +143,6 @@ public abstract class PlaybackActivity extends BaseActivity implements MediaCont
         observeForever(liveData, serviceObserver);
     }
 
-    public void toggleDebugView() {
-        getPlayerView().toggleDebugView();
-        PlayerSetting.putDebug(getPlayerView().isDebugViewVisible());
-    }
-
     public void onChoose() {
         if (!hasPlaybackSource()) return;
         PlayerManager player = player();
@@ -208,9 +196,6 @@ public abstract class PlaybackActivity extends BaseActivity implements MediaCont
     }
 
     protected void onDecodeChanged() {
-    }
-
-    protected void onMediaOptionsChanged() {
     }
 
     protected void onError(String msg) {
@@ -411,28 +396,12 @@ public abstract class PlaybackActivity extends BaseActivity implements MediaCont
 
     private void syncPlayerView(Player player) {
         player().bindPlayerView(getPlayerView());
-        danmakuController.bind(getPlayerView());
         getPlayerView().setPlayer(player);
-        syncDanmakuSource();
-        restoreDebugView();
-    }
-
-    private void restoreDebugView() {
-        if (PlayerSetting.isDebug() && !getPlayerView().isDebugViewVisible()) getPlayerView().toggleDebugView();
     }
 
     private void configurePlayerView() {
         PlayerView playerView = getPlayerView();
-        playerView.setRender(PlayerSetting.getRender());
-        danmakuController.setOkHttpClient(OkHttp.player());
-        danmakuController.setEnabled(DanmakuSetting.isShow());
-        danmakuController.setConfig(DanmakuSetting.getConfig());
         SubtitleSetting.applyStyle(playerView.getSubtitleView());
-    }
-
-    private void syncDanmakuSource() {
-        if (mService == null || !isOwner()) return;
-        danmakuController.setDataSource(player().getSelectedDanmakuUri());
     }
 
     private void releasePlaybackService() {
@@ -503,17 +472,11 @@ public abstract class PlaybackActivity extends BaseActivity implements MediaCont
         @Override
         public void onTracksChanged() {
             if (isOwner()) PlaybackActivity.this.onTracksChanged();
-            restoreDebugView();
         }
 
         @Override
         public void onDecodeChanged() {
             if (isOwner()) PlaybackActivity.this.onDecodeChanged();
-        }
-
-        @Override
-        public void onMediaOptionsChanged() {
-            if (isOwner()) PlaybackActivity.this.onMediaOptionsChanged();
         }
 
         @Override
@@ -526,25 +489,6 @@ public abstract class PlaybackActivity extends BaseActivity implements MediaCont
             if (isOwner()) syncPlayerView(player);
         }
 
-        @Override
-        public void onDanmakuSourceChanged(@Nullable Uri uri) {
-            if (isOwner()) danmakuController.setDataSource(uri);
-        }
-
-        @Override
-        public void onDanmakuConfigChanged(DanmakuConfig config) {
-            if (isOwner()) danmakuController.setConfig(config);
-        }
-
-        @Override
-        public void onDanmakuEnabledChanged(boolean enabled) {
-            if (isOwner()) danmakuController.setEnabled(enabled);
-        }
-
-        @Override
-        public void onDanmakuSent(String text) {
-            if (isOwner()) danmakuController.sendNow(text);
-        }
     };
 
     @Override
