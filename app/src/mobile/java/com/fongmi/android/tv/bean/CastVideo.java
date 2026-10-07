@@ -1,5 +1,7 @@
 package com.fongmi.android.tv.bean;
 
+import com.fongmi.android.tv.cache.ResolvedVideoSource;
+import com.fongmi.android.tv.cache.VideoSourceResolver;
 import com.fongmi.android.tv.player.PlayerManager;
 import com.fongmi.android.tv.server.Server;
 import com.github.catvod.utils.Path;
@@ -14,9 +16,14 @@ public record CastVideo(String name, String url, long position, Map<String, Stri
         return new CastVideo(player.getMediaTitle(), player.getUrl(), position, player.getHeaders());
     }
 
+    public CastVideo resolve(History history) {
+        ResolvedVideoSource source = VideoSourceResolver.cast(history, url, headers);
+        return new CastVideo(name, source.resolvedUrl(), position, source.headers());
+    }
+
     public CastVideo {
-        headers = new LinkedHashMap<>(headers);
-        if (url.startsWith("file")) url = Server.get().getAddress() + "/" + url.replace(Path.rootPath(), "").replace("://", "");
-        if (url.contains("127.0.0.1")) url = url.replace("127.0.0.1", Util.getIp());
+        headers = headers == null ? new LinkedHashMap<>() : new LinkedHashMap<>(headers);
+        if (url != null && url.startsWith("file")) url = Server.get().getAddress() + "/" + url.replace(Path.rootPath(), "").replace("://", "");
+        if (url != null && url.contains("127.0.0.1")) url = url.replace("127.0.0.1", Util.getIp());
     }
 }

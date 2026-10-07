@@ -56,6 +56,11 @@ public class Server {
         }
     }
 
+    public boolean isRunning() {
+        Nano server = nano;
+        return server != null && server.isAlive();
+    }
+
     public void stop() {
         Task.execute(() -> {
             if (nano != null) nano.stop();

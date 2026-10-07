@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -82,6 +83,10 @@
             android:process=":error_activity"
             android:theme="@style/Theme.Crash" />
 
+        <activity
+            android:name=".cache.CacheActivity"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation" />
+
         <receiver
             android:name=".receiver.ActionReceiver"
             android:exported="false">
@@ -94,6 +99,11 @@
                 <action android:name="${applicationId}.audio" />
             </intent-filter>
         </receiver>
+
+        <service
+            android:name=".service.CacheDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <service
             android:name=".service.PlaybackService"

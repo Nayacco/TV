@@ -55,6 +55,8 @@ import com.fongmi.android.tv.bean.Result;
 import com.fongmi.android.tv.bean.Site;
 import com.fongmi.android.tv.bean.Sub;
 import com.fongmi.android.tv.bean.Vod;
+import com.fongmi.android.tv.cache.CacheRepository;
+import com.fongmi.android.tv.cache.CacheRequest;
 import com.fongmi.android.tv.databinding.ActivityVideoBinding;
 import com.fongmi.android.tv.db.AppDatabase;
 import com.fongmi.android.tv.event.CastEvent;
@@ -157,6 +159,16 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         start(activity, key, id, name, pic, null, true);
     }
 
+    public static void startCache(Activity activity, String path, String name, String pic) {
+        Intent intent = new Intent(activity, VideoActivity.class);
+        intent.putExtra("cacheLocal", true);
+        intent.putExtra("name", name);
+        intent.putExtra("key", SiteApi.PUSH);
+        intent.putExtra("id", path);
+        putPic(intent, pic);
+        activity.startActivity(intent);
+    }
+
     public static void start(Activity activity, String url) {
         start(activity, SiteApi.PUSH, url, url);
     }
@@ -200,6 +212,10 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
 
     private String getMark() {
         return Objects.toString(getIntent().getStringExtra("mark"), "");
+    }
+
+    private boolean isCacheLocal() {
+        return getIntent().getBooleanExtra("cacheLocal", false);
     }
 
     private String getKey() {
@@ -345,6 +361,7 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         mBinding.control.action.speed.setOnClickListener(view -> onSpeed());
         mBinding.control.action.reset.setOnClickListener(view -> onReset());
         mBinding.control.action.replay.setOnClickListener(view -> onReplay());
+        mBinding.control.action.cache.setOnClickListener(view -> onCache());
         mBinding.control.action.parse.setOnClickListener(view -> onParse());
         mBinding.control.action.player.setOnClickListener(view -> onPlayer());
         mBinding.control.action.decode.setOnClickListener(view -> onDecode());
@@ -588,6 +605,7 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
 
     @Override
     public void renderDetail(Vod item, History history) {
+        applyCacheMetadata(item, history);
         mHistory = history;
         mBinding.swipeLayout.setRefreshing(false);
         mBinding.progressLayout.showContent();
@@ -597,6 +615,18 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
         checkKeepImg();
         setText(item);
         updateKeep();
+    }
+
+    private void applyCacheMetadata(Vod item, History history) {
+        if (!isCacheLocal()) return;
+        if (!getName().isEmpty()) {
+            item.setName(getName());
+            history.setVodName(getName());
+        }
+        if (!getPic().isEmpty()) {
+            item.setPic(getPic());
+            history.setVodPic(getPic());
+        }
     }
 
     @Override
@@ -893,6 +923,33 @@ public class VideoActivity extends PlaybackActivity implements Clock.Callback, C
 
     private void onCast() {
         CastDialog.create(player()).history(mHistory).show(this);
+    }
+
+    private void onCache() {
+        if (isCacheLocal()) {
+            Notify.show(R.string.cache_exists);
+            return;
+        }
+        if (mHistory == null || player().isEmpty()) {
+            Notify.show(R.string.cache_unavailable);
+            return;
+        }
+        try {
+            CacheRequest request = CacheRequest.from(mHistory, player().getMediaTitle(), player().getUrl(), player().getHeaders(), null);
+            CacheRepository.get().enqueue(request, new CacheRepository.EnqueueCallback() {
+                @Override
+                public void onSuccess(com.fongmi.android.tv.cache.CacheMetadata metadata, boolean existed) {
+                    Notify.show(existed ? R.string.cache_exists : R.string.cache_added);
+                }
+
+                @Override
+                public void onError(String message) {
+                    Notify.show(message);
+                }
+            });
+        } catch (Exception e) {
+            Notify.show(e.getMessage());
+        }
     }
 
     private void onInfo() {

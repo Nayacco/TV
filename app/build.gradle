@@ -90,6 +90,7 @@ dependencies {
     implementation project(':catvod')
     implementation project(':chaquo')
     implementation project(':quickjs')
+    implementation project(':fluxdown-android')
     implementation libs.appcompat
     implementation libs.lifecycle.service
     implementation libs.media
@@ -122,4 +123,5 @@ dependencies {
     annotationProcessor libs.eventbus.annotation.processor
     annotationProcessor libs.glide.compiler
     coreLibraryDesugaring libs.desugar
+    testImplementation libs.junit
 }

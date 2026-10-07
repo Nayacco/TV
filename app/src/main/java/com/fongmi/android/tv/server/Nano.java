@@ -5,6 +5,7 @@ import com.fongmi.android.tv.bean.Device;
 import com.fongmi.android.tv.server.impl.Process;
 import com.fongmi.android.tv.server.process.Action;
 import com.fongmi.android.tv.server.process.Cache;
+import com.fongmi.android.tv.server.process.CacheMedia;
 import com.fongmi.android.tv.server.process.Image;
 import com.fongmi.android.tv.server.process.Local;
 import com.fongmi.android.tv.server.process.Media;
@@ -34,6 +35,7 @@ public class Nano extends NanoHTTPD {
     private void addProcess() {
         process = new ArrayList<>();
         process.add(new Action());
+        process.add(new CacheMedia());
         process.add(new Cache());
         process.add(new Image());
         process.add(new Local());

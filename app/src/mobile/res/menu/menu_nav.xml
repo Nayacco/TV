@@ -14,6 +14,12 @@
         android:visible="false" />
 
     <item
+        android:id="@+id/cache"
+        android:icon="@drawable/ic_sync_download"
+        android:title="@string/nav_cache"
+        android:visible="false" />
+
+    <item
         android:id="@+id/setting"
         android:icon="@drawable/ic_nav_setting"
         android:title="@string/nav_setting"

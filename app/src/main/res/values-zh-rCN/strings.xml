@@ -380,6 +380,34 @@
     <!-- Hint -->
     <string name="copied">已复制</string>
 
+    <!-- Cache -->
+    <string name="cache_title">缓存列表</string>
+    <string name="nav_cache">缓存</string>
+    <string name="home_cache">缓存</string>
+    <string name="cache_action">缓存</string>
+    <string name="cache_added">已加入缓存</string>
+    <string name="cache_exists">已缓存或正在缓存</string>
+    <string name="cache_unavailable">缓存文件不可用</string>
+    <string name="cache_status_waiting">等待中</string>
+    <string name="cache_status_downloading">缓存中</string>
+    <string name="cache_status_paused">已暂停</string>
+    <string name="cache_status_completed">已完成</string>
+    <string name="cache_status_failed">失败</string>
+    <string name="cache_progress_unknown">—</string>
+    <string name="cache_progress_percent">%1$d%%</string>
+    <string name="cache_size">%1$s / %2$s</string>
+    <string name="cache_speed">%1$s/s</string>
+    <string name="cache_created">创建：%1$s</string>
+    <string name="cache_completed">完成：%1$s</string>
+    <string name="cache_path">路径：%1$s</string>
+    <string name="cache_error">错误：%1$s</string>
+    <string name="cache_file_pending">缓存文件尚未就绪</string>
+    <string name="cache_resume">继续</string>
+    <string name="cache_cancel">取消</string>
+    <string name="cache_delete">删除</string>
+    <string name="cache_unknown">未知</string>
+    <string name="cache_item_description">%1$s，%2$s</string>
+
     <!-- UNIT -->
     <string name="all">全部</string>
     <string name="yes">有</string>

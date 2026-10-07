@@ -11,6 +11,8 @@ import com.fongmi.android.tv.bean.Keep;
 import com.fongmi.android.tv.bean.Parse;
 import com.fongmi.android.tv.bean.Result;
 import com.fongmi.android.tv.bean.Vod;
+import com.fongmi.android.tv.cache.ResolvedVideoSource;
+import com.fongmi.android.tv.cache.VideoSourceResolver;
 import com.fongmi.android.tv.playback.PlaybackResult;
 
 import java.util.Collections;
@@ -111,13 +113,18 @@ public class VodPlaybackController {
     }
 
     private void applyPlaybackResult(Result result, VodPlayRequest request) {
+        applyPlaybackResult(result, request, false);
+    }
+
+    private void applyPlaybackResult(Result result, VodPlayRequest request, boolean sourceResolved) {
         Episode episode = findEpisode(request);
         if (episode == null) return;
+        if (!sourceResolved) result = resolveCached(result);
         applyPlaybackState(result, request);
         renderPlaybackResult(result);
         updatePlaybackPosition(result);
         host.loadDanmaku(result, state.getHistory(), episode);
-        startPlayback(result, startPositionMs(), episode);
+        startResolvedPlayback(result, state.isUseParse(), startPositionMs(), episode);
         preloader.update(result);
     }
 
@@ -140,8 +147,13 @@ public class VodPlaybackController {
     }
 
     private void startPlayback(Result result, long startPositionMs, Episode episode) {
+        Result resolved = resolveCached(result);
+        startResolvedPlayback(resolved, resolved == result && state.isUseParse(), startPositionMs, episode);
+    }
+
+    private void startResolvedPlayback(Result result, boolean useParse, long startPositionMs, Episode episode) {
         MediaMetadata metadata = publishPlaybackMetadata(episode);
-        host.startPlayback(result, state.isUseParse(), startPositionMs, metadata);
+        host.startPlayback(result, useParse, startPositionMs, metadata);
     }
 
     public void onSearchResult(Result result) {
@@ -420,8 +432,27 @@ public class VodPlaybackController {
         VodPlayRequest request = VodPlayRequest.create(host.getVodKey(), flag, episode);
         state.setPendingRequest(request);
         publishPlaybackMetadata(episode);
+        Result cached = resolveCached(null);
+        if (cached != null) {
+            host.onPlaybackRequested();
+            applyPlaybackResult(cached, request, true);
+            return;
+        }
         dataSource.playerContent(request);
         host.onPlaybackRequested();
+    }
+
+    private Result resolveCached(Result remote) {
+        String url = remote == null ? "" : remote.getRealUrl();
+        ResolvedVideoSource source = VideoSourceResolver.playback(state.getHistory(), url,
+                remote == null ? Collections.emptyMap() : remote.getHeader());
+        if (!source.isLocal()) return remote;
+        Result local = Result.empty();
+        local.setUrl(source.resolvedUrl());
+        local.setFormat(source.mimeType());
+        local.setParse(0);
+        if (remote != null) local.setSubs(remote.getSubs());
+        return local;
     }
 
     private Episode findEpisode(VodPlayRequest request) {

@@ -380,6 +380,34 @@
     <!-- Hint -->
     <string name="copied">Copied</string>
 
+    <!-- Cache -->
+    <string name="cache_title">Cached videos</string>
+    <string name="nav_cache">Cache</string>
+    <string name="home_cache">Cache</string>
+    <string name="cache_action">Cache</string>
+    <string name="cache_added">Added to cache</string>
+    <string name="cache_exists">Already cached or caching</string>
+    <string name="cache_unavailable">Cached file is unavailable</string>
+    <string name="cache_status_waiting">Waiting</string>
+    <string name="cache_status_downloading">Downloading</string>
+    <string name="cache_status_paused">Paused</string>
+    <string name="cache_status_completed">Completed</string>
+    <string name="cache_status_failed">Failed</string>
+    <string name="cache_progress_unknown">—</string>
+    <string name="cache_progress_percent">%1$d%%</string>
+    <string name="cache_size">%1$s / %2$s</string>
+    <string name="cache_speed">%1$s/s</string>
+    <string name="cache_created">Created: %1$s</string>
+    <string name="cache_completed">Completed: %1$s</string>
+    <string name="cache_path">Path: %1$s</string>
+    <string name="cache_error">Error: %1$s</string>
+    <string name="cache_file_pending">Cache file is not ready</string>
+    <string name="cache_resume">Resume</string>
+    <string name="cache_cancel">Cancel</string>
+    <string name="cache_delete">Delete</string>
+    <string name="cache_unknown">Unknown</string>
+    <string name="cache_item_description">%1$s, %2$s</string>
+
     <!-- UNIT -->
     <string name="all">All</string>
     <string name="yes">Yes</string>

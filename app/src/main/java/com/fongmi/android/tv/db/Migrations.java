@@ -49,4 +49,13 @@ public class Migrations {
             database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_Track_key_type` ON `Track` (`key`, `type`)");
         }
     };
+
+    public static final Migration MIGRATION_35_36 = new Migration(35, 36) {
+        @Override
+        public void migrate(@NonNull SupportSQLiteDatabase database) {
+            database.execSQL("CREATE TABLE IF NOT EXISTS `CacheMetadata` (`cacheKey` TEXT NOT NULL, `title` TEXT NOT NULL, `poster` TEXT, `sourceName` TEXT, `episodeName` TEXT, `originalUrl` TEXT NOT NULL, `headersJson` TEXT NOT NULL, `outputFileName` TEXT NOT NULL, `localPath` TEXT, `mimeType` TEXT, `fluxdownTaskId` TEXT, `status` TEXT NOT NULL, `downloadedBytes` INTEGER NOT NULL, `totalBytes` INTEGER NOT NULL, `speedBytesPerSecond` INTEGER NOT NULL, `createTime` INTEGER NOT NULL, `updateTime` INTEGER NOT NULL, `completeTime` INTEGER, `errorMessage` TEXT, PRIMARY KEY(`cacheKey`))");
+            database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_CacheMetadata_fluxdownTaskId` ON `CacheMetadata` (`fluxdownTaskId`)");
+            database.execSQL("CREATE INDEX IF NOT EXISTS `index_CacheMetadata_status` ON `CacheMetadata` (`status`)");
+        }
+    };
 }

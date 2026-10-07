@@ -1,0 +1,4 @@
+[submodule "rust/fluxdown"]
+	path = rust/fluxdown
+	url = https://github.com/zerx-lab/FluxDown.git
+	shallow = true

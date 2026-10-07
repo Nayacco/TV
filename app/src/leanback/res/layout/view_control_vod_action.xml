@@ -58,6 +58,12 @@
             android:text="@string/play_replay" />
 
         <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/cache"
+            style="@style/Control"
+            android:layout_marginEnd="8dp"
+            android:text="@string/cache_action" />
+
+        <com.google.android.material.textview.MaterialTextView
             android:id="@+id/repeat"
             style="@style/Control"
             android:layout_marginEnd="8dp"

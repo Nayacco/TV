@@ -24,4 +24,6 @@ include ':app'
 include ':catvod'
 include ':chaquo'
 include ':quickjs'
+include ':fluxdown-android'
+project(':fluxdown-android').projectDir = file('rust/fluxdown-android')
 rootProject.name = "TV"

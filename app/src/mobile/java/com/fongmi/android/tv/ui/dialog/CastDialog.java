@@ -71,6 +71,7 @@ public class CastDialog extends BaseBottomSheetDialog implements DeviceAdapter.O
     }
 
     public CastDialog history(History history) {
+        video = video.resolve(history);
         String id = history.getVodId();
         String fd = history.getVodId();
         if (fd.startsWith("/")) fd = Server.get().getAddress() + "/file" + fd.replace(Path.rootPath(), "");
