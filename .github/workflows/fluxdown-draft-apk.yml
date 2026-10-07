@@ -1,0 +1,312 @@
+name: FluxDown draft APK
+
+on:
+  push:
+    branches:
+      - codex/fluxdown-cache
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fluxdown-draft-apk-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build APKs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    outputs:
+      build_type: ${{ steps.signing.outputs.build_type }}
+      signing_label: ${{ steps.signing.outputs.signing_label }}
+      fluxdown_sha: ${{ steps.collect.outputs.fluxdown_sha }}
+    env:
+      NDK_VERSION: "28.2.13676358"
+
+    steps:
+      - name: Check out source and FluxDown
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Make Gradle wrapper executable
+        shell: bash
+        run: chmod +x gradlew
+
+      - name: Set up JetBrains Runtime 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: jetbrains
+          java-version: "21"
+          java-package: jdk
+          cache: gradle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: chaquo/requirements.txt
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android platform and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager \
+            "platforms;android-37.0" \
+            "build-tools;36.0.0" \
+            "ndk;${NDK_VERSION}"
+
+          if [[ ! -e "${ANDROID_HOME}/platforms/android-37" ]]; then
+            test -d "${ANDROID_HOME}/platforms/android-37.0"
+            ln -s "${ANDROID_HOME}/platforms/android-37.0" "${ANDROID_HOME}/platforms/android-37"
+          fi
+
+          ndk_home="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          test -f "${ndk_home}/source.properties"
+          echo "ANDROID_NDK_HOME=${ndk_home}" >> "${GITHUB_ENV}"
+          echo "ANDROID_NDK_ROOT=${ndk_home}" >> "${GITHUB_ENV}"
+
+      - name: Set up Rust Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/fluxdown -> target
+          cache-on-failure: true
+          key: fluxdown-android
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+
+      - name: Configure APK signing
+        id: signing
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          signing_values=0
+          [[ -n "${ANDROID_KEYSTORE_BASE64}" ]] && signing_values=$((signing_values + 1))
+          [[ -n "${ANDROID_KEY_ALIAS}" ]] && signing_values=$((signing_values + 1))
+          [[ -n "${ANDROID_STORE_PASSWORD}" ]] && signing_values=$((signing_values + 1))
+
+          if [[ "${signing_values}" -eq 3 ]]; then
+            keystore="${RUNNER_TEMP}/release.jks"
+            printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${keystore}"
+            test -s "${keystore}"
+            key_alias="${ANDROID_KEY_ALIAS}"
+            store_password="${ANDROID_STORE_PASSWORD}"
+            build_type="release"
+            signing_label="repository release key"
+          elif [[ "${signing_values}" -eq 0 ]]; then
+            keystore="${RUNNER_TEMP}/unused-release-key.jks"
+            key_alias="unused"
+            store_password="unused"
+            build_type="debug"
+            signing_label="runner-generated Android debug key"
+            echo "::warning::Signing secrets are not configured; publishing debug APKs."
+          else
+            echo "::error::Configure all three signing secrets or remove all of them: ANDROID_KEYSTORE_BASE64, ANDROID_KEY_ALIAS, ANDROID_STORE_PASSWORD."
+            exit 1
+          fi
+
+          python - "${ANDROID_HOME}" "${ANDROID_NDK_HOME}" "${keystore}" "${key_alias}" "${store_password}" <<'PY'
+          import sys
+
+          def escape(value: str) -> str:
+              return (value.replace("\\", "\\\\")
+                           .replace("\n", "\\n")
+                           .replace("\r", "\\r")
+                           .replace("=", "\\=")
+                           .replace(":", "\\:")
+                           .replace("#", "\\#")
+                           .replace("!", "\\!"))
+
+          keys = ("sdk.dir", "ndk.dir", "storeFile", "keyAlias", "storePassword")
+          values = sys.argv[1:]
+          with open("local.properties", "w", encoding="ISO-8859-1", newline="\n") as handle:
+              for key, value in zip(keys, values, strict=True):
+                  handle.write(f"{key}={escape(value)}\n")
+          PY
+
+          echo "BUILD_TYPE=${build_type}" >> "${GITHUB_ENV}"
+          echo "SIGNING_LABEL=${signing_label}" >> "${GITHUB_ENV}"
+          echo "build_type=${build_type}" >> "${GITHUB_OUTPUT}"
+          echo "signing_label=${signing_label}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build release APKs
+        if: env.BUILD_TYPE == 'release'
+        shell: bash
+        run: >-
+          ./gradlew --no-daemon
+          :app:assembleLeanbackRelease
+          :app:assembleMobileRelease
+
+      - name: Build debug APKs
+        if: env.BUILD_TYPE == 'debug'
+        shell: bash
+        run: >-
+          ./gradlew --no-daemon
+          :app:assembleLeanbackDebug
+          :app:assembleMobileDebug
+
+      - name: Collect and verify APKs
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          if [[ "${BUILD_TYPE}" == "release" ]]; then
+            find Release/apk -maxdepth 1 -type f -name '*.apk' -exec cp '{}' dist/ ';'
+          else
+            find app/build/outputs/apk -type f -path '*/debug/*' -name '*.apk' -exec cp '{}' dist/ ';'
+          fi
+
+          mapfile -t apks < <(find dist -maxdepth 1 -type f -name '*.apk' | sort)
+          if [[ "${#apks[@]}" -ne 4 ]]; then
+            printf 'Expected 4 APKs, found %s\n' "${#apks[@]}" >&2
+            printf '%s\n' "${apks[@]}" >&2
+            exit 1
+          fi
+
+          short_sha="${GITHUB_SHA:0:7}"
+          for apk in "${apks[@]}"; do
+            name="$(basename "${apk}" .apk)"
+            mv "${apk}" "dist/${name}-${short_sha}.apk"
+          done
+
+          (cd dist && sha256sum -- *.apk > SHA256SUMS.txt)
+          fluxdown_sha="$(git -C rust/fluxdown rev-parse HEAD)"
+          cat > dist/SOURCE.txt <<EOF
+          Root source: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}
+          Root commit: ${GITHUB_SHA}
+          FluxDown source: https://github.com/zerx-lab/FluxDown/tree/${fluxdown_sha}
+          FluxDown commit: ${fluxdown_sha}
+          FluxDown license: https://github.com/zerx-lab/FluxDown/blob/${fluxdown_sha}/LICENSE
+          EOF
+          echo "fluxdown_sha=${fluxdown_sha}" >> "${GITHUB_OUTPUT}"
+          ls -lh dist
+
+      - name: Pass APKs to release job
+        uses: actions/upload-artifact@v7
+        with:
+          name: fluxdown-apks-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  release:
+    name: Create draft release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      BUILD_TYPE: ${{ needs.build.outputs.build_type }}
+      SIGNING_LABEL: ${{ needs.build.outputs.signing_label }}
+      FLUXDOWN_SHA: ${{ needs.build.outputs.fluxdown_sha }}
+
+    steps:
+      - name: Download APKs
+        uses: actions/download-artifact@v7
+        with:
+          name: fluxdown-apks-${{ github.sha }}
+          path: dist
+
+      - name: Create or update draft release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="fluxdown-cache-${GITHUB_SHA}"
+          short_sha="${GITHUB_SHA:0:7}"
+          title="FluxDown cache ${short_sha}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [[ "${BUILD_TYPE}" == "debug" ]]; then
+            install_note="Debug signing is generated per runner; uninstall an older draft build before installing this one."
+          else
+            install_note="Release signing uses the repository signing secrets and supports normal upgrades."
+          fi
+
+          cat > "${RUNNER_TEMP}/release-notes.md" <<EOF
+          Automated draft build from \`${GITHUB_REF_NAME}\`.
+
+          - Commit: \`${GITHUB_SHA}\`
+          - Build type: \`${BUILD_TYPE}\`
+          - Signing: ${SIGNING_LABEL}
+          - Installation: ${install_note}
+          - Workflow run: ${run_url}
+          - FluxDown source: https://github.com/zerx-lab/FluxDown/tree/${FLUXDOWN_SHA}
+
+          Assets contain the TV and mobile APKs for arm64-v8a and armeabi-v7a. Verify downloads with \`SHA256SUMS.txt\`.
+          EOF
+
+          if existing_draft="$(gh release view "${tag}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "${existing_draft}" != "true" ]]; then
+              echo "::error::Release ${tag} already exists and is not a draft."
+              exit 1
+            fi
+            gh release edit "${tag}" \
+              --draft \
+              --target "${GITHUB_SHA}" \
+              --title "${title}" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md"
+          else
+            gh release create "${tag}" \
+              --draft \
+              --latest=false \
+              --target "${GITHUB_SHA}" \
+              --title "${title}" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md"
+          fi
+
+          for attempt in {1..10}; do
+            if gh release view "${tag}" >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "${attempt}" -eq 10 ]]; then
+              echo "::error::Draft release ${tag} did not become available."
+              exit 1
+            fi
+            sleep 2
+          done
+
+          gh release upload "${tag}" dist/*.apk dist/SHA256SUMS.txt dist/SOURCE.txt --clobber
+
+          release_json="$(gh release view "${tag}" --json isDraft,targetCommitish,assets,url)"
+          [[ "$(jq -r '.isDraft' <<< "${release_json}")" == "true" ]]
+          [[ "$(jq -r '.targetCommitish' <<< "${release_json}")" == "${GITHUB_SHA}" ]]
+          [[ "$(jq '[.assets[] | select(.name | endswith(".apk"))] | length' <<< "${release_json}")" -eq 4 ]]
+
+          release_url="$(jq -r '.url' <<< "${release_json}")"
+          echo "url=${release_url}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Draft APK release"
+            echo
+            echo "- ${release_url}"
+            echo "- Build type: ${BUILD_TYPE}"
+            echo "- Signing: ${SIGNING_LABEL}"
+          } >> "${GITHUB_STEP_SUMMARY}"
