@@ -169,10 +169,11 @@ jobs:
           echo "signing_label=${signing_label}" >> "${GITHUB_OUTPUT}"
           echo "signing_persistent=${signing_persistent}" >> "${GITHUB_OUTPUT}"
 
-      - name: Build optimized release APKs
+      - name: Test cache contracts and build optimized release APKs
         shell: bash
         run: >-
           ./gradlew --no-daemon
+          :app:testLeanbackReleaseUnitTest
           :app:assembleLeanbackRelease
           :app:assembleMobileRelease
 

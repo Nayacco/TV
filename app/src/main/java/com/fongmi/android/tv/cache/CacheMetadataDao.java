@@ -34,6 +34,9 @@ public abstract class CacheMetadataDao extends BaseDao<CacheMetadata> {
     @Query("UPDATE CacheMetadata SET outputFileName = :fileName, updateTime = :updateTime WHERE cacheKey = :cacheKey")
     public abstract int updateFileName(String cacheKey, String fileName, long updateTime);
 
+    @Query("UPDATE CacheMetadata SET originalUrl = :originalUrl, updateTime = :updateTime WHERE cacheKey = :cacheKey")
+    public abstract int updateOriginalUrl(String cacheKey, String originalUrl, long updateTime);
+
     @Query("UPDATE CacheMetadata SET status = :status, downloadedBytes = :downloadedBytes, totalBytes = :totalBytes, speedBytesPerSecond = :speedBytesPerSecond, updateTime = :updateTime, errorMessage = :errorMessage WHERE cacheKey = :cacheKey AND status != 'completed'")
     public abstract int updateProgress(String cacheKey, String status, long downloadedBytes, long totalBytes, long speedBytesPerSecond, long updateTime, String errorMessage);
 
@@ -42,6 +45,9 @@ public abstract class CacheMetadataDao extends BaseDao<CacheMetadata> {
 
     @Query("UPDATE CacheMetadata SET status = 'failed', speedBytesPerSecond = 0, updateTime = :updateTime, errorMessage = :errorMessage WHERE cacheKey = :cacheKey")
     public abstract int markFailed(String cacheKey, String errorMessage, long updateTime);
+
+    @Query("UPDATE CacheMetadata SET status = 'failed', mimeType = :mimeType, outputFileName = '', downloadedBytes = 0, totalBytes = 0, speedBytesPerSecond = 0, updateTime = :updateTime, completeTime = NULL, errorMessage = :errorMessage WHERE cacheKey = :cacheKey")
+    public abstract int markIncomplete(String cacheKey, String mimeType, String errorMessage, long updateTime);
 
     @Query("DELETE FROM CacheMetadata WHERE cacheKey = :cacheKey")
     public abstract int delete(String cacheKey);

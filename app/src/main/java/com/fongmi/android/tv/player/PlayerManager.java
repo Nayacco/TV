@@ -107,6 +107,10 @@ public class PlayerManager implements ParseCallback {
         return spec == null ? null : spec.getUrl();
     }
 
+    public String getFormat() {
+        return spec == null ? null : spec.getFormat();
+    }
+
     public String getKey() {
         return spec == null ? null : spec.getKey();
     }

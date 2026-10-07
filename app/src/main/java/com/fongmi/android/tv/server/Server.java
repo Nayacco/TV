@@ -9,6 +9,7 @@ public class Server {
 
     private volatile PlaybackService service;
     private volatile Nano nano;
+    private long lifecycleVersion;
 
     private static class Loader {
         static volatile Server INSTANCE = new Server();
@@ -22,7 +23,8 @@ public class Server {
         return service;
     }
 
-    public void setService(PlaybackService service) {
+    public synchronized void setService(PlaybackService service) {
+        if (service != null) lifecycleVersion++;
         this.service = service;
     }
 
@@ -43,6 +45,7 @@ public class Server {
     }
 
     public synchronized void start() {
+        lifecycleVersion++;
         if (nano != null) return;
         for (int i = 9978; i < 9999; i++) {
             try {
@@ -61,11 +64,24 @@ public class Server {
         return server != null && server.isAlive();
     }
 
+    public synchronized void retain() {
+        lifecycleVersion++;
+    }
+
     public void stop() {
+        final long version;
+        final Nano target;
+        synchronized (this) {
+            version = ++lifecycleVersion;
+            target = nano;
+        }
         Task.execute(() -> {
-            if (nano != null) nano.stop();
-            service = null;
-            nano = null;
+            synchronized (this) {
+                if (version != lifecycleVersion || nano != target) return;
+                if (target != null) target.stop();
+                service = null;
+                nano = null;
+            }
         });
     }
 }

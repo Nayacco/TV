@@ -49,8 +49,11 @@ public final class VideoSourceResolver {
         File file;
         try {
             file = CachePaths.requireReadableFile(new File(metadata.getLocalPath()));
+            CacheFileValidator.requireOfflineMedia(file);
+            CacheTrackValidator.requireCompleteTracks(file, metadata.getOriginalUrl(), metadata.getMimeType());
         } catch (Exception e) {
-            CacheRepository.get().invalidateCompleted(metadata.getCacheKey(), "Cached file is missing or unreadable");
+            String message = e.getMessage() == null || e.getMessage().isEmpty() ? "Cached file is missing or unreadable" : e.getMessage();
+            CacheRepository.get().invalidateCompleted(metadata.getCacheKey(), message);
             return remote(resolvedKey, fallbackUrl, fallbackHeaders);
         }
         if (cast) {

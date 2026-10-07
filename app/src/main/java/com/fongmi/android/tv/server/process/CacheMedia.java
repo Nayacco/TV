@@ -4,7 +4,9 @@ import static fi.iki.elonen.NanoHTTPD.MIME_PLAINTEXT;
 import static fi.iki.elonen.NanoHTTPD.newFixedLengthResponse;
 
 import com.fongmi.android.tv.cache.CacheMetadata;
+import com.fongmi.android.tv.cache.CacheFileValidator;
 import com.fongmi.android.tv.cache.CachePaths;
+import com.fongmi.android.tv.cache.CacheTrackValidator;
 import com.fongmi.android.tv.db.AppDatabase;
 import com.fongmi.android.tv.server.FileResponder;
 import com.fongmi.android.tv.server.impl.Process;
@@ -44,6 +46,8 @@ public final class CacheMedia implements Process {
             String localPath = metadata.getLocalPath();
             if (localPath == null || localPath.trim().isEmpty()) return notFound();
             File file = CachePaths.requireReadableFile(new File(localPath));
+            CacheFileValidator.requireOfflineMedia(file);
+            CacheTrackValidator.requireCompleteTracks(file, metadata.getOriginalUrl(), metadata.getMimeType());
             return FileResponder.respond(method, session.getHeaders(), file, metadata.getMimeType());
         } catch (Exception e) {
             return notFound();

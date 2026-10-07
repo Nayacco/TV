@@ -3,7 +3,10 @@ package com.fongmi.android.tv.cache;
 import android.text.TextUtils;
 
 import com.fongmi.android.tv.App;
+import com.fongmi.android.tv.api.config.VodConfig;
+import com.fongmi.android.tv.bean.Site;
 import com.fongmi.android.tv.db.AppDatabase;
+import com.fongmi.android.tv.server.Server;
 import com.fongmi.android.tv.service.CacheDownloadService;
 import com.fongmi.fluxdown.FluxDownEngine;
 import com.fongmi.fluxdown.FluxTaskInfo;
@@ -22,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /** Owns FongMi metadata and joins it to FluxDown's persistent task stream by task UUID. */
@@ -39,11 +43,17 @@ public final class CacheRepository implements FluxDownEngine.Listener {
     private final Map<String, FluxTaskInfo> pendingTasks = new HashMap<>();
     private final Map<String, Operation> operations = new HashMap<>();
     private final Set<String> ignoredTaskIds = new HashSet<>();
+    private final Set<String> completionChecks = new HashSet<>();
+    private final AtomicLong idleActionVersion = new AtomicLong();
+    private PendingCleanup pendingCleanup;
     private long nextOperationId;
 
     private enum Action { CREATE, RESTART, PAUSE, RESUME, CANCEL, DELETE }
 
     private record Operation(long id, Action action) {
+    }
+
+    private record PendingCleanup(long version, Runnable callback) {
     }
 
     private static class Loader {
@@ -61,6 +71,14 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         serial.execute(() -> {
             if (dao().countRunning() == 0) return;
             try {
+                cancelPendingCleanup();
+                List<CacheMetadata> active = dao().findActive();
+                prepareProxySource(active);
+                String serverBaseUrl = Server.get().getAddress(true);
+                for (CacheMetadata item : active) {
+                    if (CacheMetadata.PAUSED.equals(item.getStatus()) || !proxyEndpointChanged(item, serverBaseUrl)) continue;
+                    restart(item, request(item), null);
+                }
                 CacheDownloadService.start(App.get());
             } catch (RuntimeException e) {
                 markActiveFailed(e.getMessage());
@@ -81,7 +99,31 @@ public final class CacheRepository implements FluxDownEngine.Listener {
     public void load(Consumer<List<CacheMetadata>> callback) {
         serial.execute(() -> {
             List<CacheMetadata> items = dao().findAll();
-            App.post(() -> callback.accept(items));
+            boolean refreshed = false;
+            for (CacheMetadata item : items) {
+                if (!item.isCompleted()) continue;
+                try {
+                    File file = CachePaths.requireReadableFile(new File(item.getLocalPath()));
+                    String streamMimeType = CacheFileValidator.streamingMimeType(file);
+                    if (streamMimeType != null) {
+                        dao().markIncomplete(item.getCacheKey(), streamMimeType,
+                                CacheFileValidator.INCOMPLETE_MESSAGE, System.currentTimeMillis());
+                        refreshed = true;
+                    } else {
+                        CacheFileValidator.requireOfflineMedia(file);
+                        CacheTrackValidator.requireCompleteTracks(file, item.getOriginalUrl(), item.getMimeType());
+                    }
+                } catch (Exception e) {
+                    dao().markFailed(item.getCacheKey(), completionError(e), System.currentTimeMillis());
+                    refreshed = true;
+                }
+            }
+            if (refreshed) {
+                items = dao().findAll();
+                CacheEvent.refresh();
+            }
+            List<CacheMetadata> result = items;
+            App.post(() -> callback.accept(result));
         });
     }
 
@@ -89,18 +131,26 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         serial.execute(() -> {
             CacheMetadata item = dao().findCompleted(cacheKey);
             if (item == null) return;
-            dao().markFailed(cacheKey, TextUtils.isEmpty(message) ? "Cached file is missing" : message, System.currentTimeMillis());
+            String error = TextUtils.isEmpty(message) ? "Cached file is missing" : message;
+            try {
+                String streamMimeType = CacheFileValidator.streamingMimeType(new File(item.getLocalPath()));
+                if (streamMimeType != null) dao().markIncomplete(cacheKey, streamMimeType, error, System.currentTimeMillis());
+                else dao().markFailed(cacheKey, error, System.currentTimeMillis());
+            } catch (Exception ignored) {
+                dao().markFailed(cacheKey, error, System.currentTimeMillis());
+            }
             CacheEvent.refresh();
             stopIfIdle();
         });
     }
 
     public void enqueue(CacheRequest request, EnqueueCallback callback) {
+        cancelPendingCleanup();
         serial.execute(() -> {
             CacheMetadata existing = dao().find(request.cacheKey());
             if (existing != null) {
-                if (CacheMetadata.FAILED.equals(existing.getStatus()) || completedFileMissing(existing)) {
-                    restart(existing, request, callback);
+                if (CacheMetadata.FAILED.equals(existing.getStatus()) || completedFileInvalid(existing)) {
+                    restart(existing, withRecoveredMimeType(existing, request), callback);
                 } else {
                     success(callback, existing, true);
                 }
@@ -124,12 +174,19 @@ public final class CacheRepository implements FluxDownEngine.Listener {
     }
 
     public void resume(String cacheKey) {
+        cancelPendingCleanup();
         serial.execute(() -> {
             Operation current = operations.get(cacheKey);
             if (current != null && current.action() != Action.PAUSE && current.action() != Action.RESUME) return;
             CacheMetadata item = dao().find(cacheKey);
             if (item == null || item.isCompleted()) return;
-            if (CacheMetadata.FAILED.equals(item.getStatus()) || TextUtils.isEmpty(item.getFluxdownTaskId())) {
+            boolean legacyProxy = CacheMediaUrl.isLocalProxy(item.getOriginalUrl()) && !CacheMediaUrl.hasSiteKey(item.getOriginalUrl());
+            boolean movedProxy = false;
+            if (CacheMediaUrl.isLocalProxy(item.getOriginalUrl())) {
+                prepareProxySource(item.getOriginalUrl());
+                movedProxy = proxyEndpointChanged(item, Server.get().getAddress(true));
+            }
+            if (CacheMetadata.FAILED.equals(item.getStatus()) || TextUtils.isEmpty(item.getFluxdownTaskId()) || legacyProxy || movedProxy) {
                 restart(item, request(item), null);
             } else {
                 control(cacheKey, false);
@@ -144,6 +201,7 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         if (item == null || item.isCompleted() || TextUtils.isEmpty(item.getFluxdownTaskId())) return;
         Operation control = begin(cacheKey, pause ? Action.PAUSE : Action.RESUME);
         try {
+            if (!pause) prepareProxySource(item.getOriginalUrl());
             CacheDownloadService.start(App.get());
             startEngine();
         } catch (RuntimeException e) {
@@ -225,6 +283,7 @@ public final class CacheRepository implements FluxDownEngine.Listener {
     public void onTaskDeleted(String taskId) {
         serial.execute(() -> {
             pendingTasks.remove(taskId);
+            completionChecks.remove(taskId);
             if (ignoredTaskIds.remove(taskId)) return;
             CacheMetadata item = dao().findByTaskId(taskId);
             if (item != null && !item.isCompleted()) {
@@ -275,7 +334,9 @@ public final class CacheRepository implements FluxDownEngine.Listener {
             String url = TextUtils.isEmpty(task.getOriginUrl()) ? task.getUrl() : task.getOriginUrl();
             boolean engineNamedFile = TextUtils.isEmpty(item.getOutputFileName());
             boolean keyedFile = task.getFileName().contains(item.getCacheKey().substring(0, 12));
-            if (item.getOriginalUrl().equals(url) && (engineNamedFile || keyedFile)) {
+            String mediaUrl = CacheMediaUrl.onLocalServer(item.getOriginalUrl(), Server.get().getAddress(true));
+            String downloadUrl = CacheMediaUrl.forDownload(mediaUrl, item.getMimeType());
+            if (downloadUrl.equals(url) && (engineNamedFile || keyedFile)) {
                 matches.add(item);
             }
         }
@@ -293,8 +354,8 @@ public final class CacheRepository implements FluxDownEngine.Listener {
             pendingTasks.put(task.getTaskId(), task);
             return;
         }
-        // Failed/canceled rows are terminal until an explicit restart replaces the row and task id.
-        if (CacheMetadata.FAILED.equals(item.getStatus())) return;
+        // Failed/canceled/completed rows are terminal until an explicit restart replaces the row and task id.
+        if (CacheMetadata.FAILED.equals(item.getStatus()) || item.isCompleted()) return;
         if (isTerminating(item.getCacheKey())) return;
         pendingTasks.remove(task.getTaskId());
         long now = System.currentTimeMillis();
@@ -303,19 +364,62 @@ public final class CacheRepository implements FluxDownEngine.Listener {
             item.setOutputFileName(task.getFileName());
         }
         if (task.getStatus() == 3) {
+            if (!completionChecks.add(task.getTaskId())) return;
             try {
-                if (task.getFileMissing()) throw new IllegalStateException("FluxDown reports the completed file missing");
-                File file = CachePaths.requireReadableFile(new File(task.getSaveDir(), task.getFileName()));
-                long size = file.length();
-                dao().markCompleted(item.getCacheKey(), file.getAbsolutePath(), mime(file, item.getMimeType()),
-                        size, task.getTotalBytes() > 0 ? task.getTotalBytes() : size,
-                        task.getCompletedAt() > 0 ? task.getCompletedAt() * 1000 : now);
-            } catch (Exception e) {
-                dao().markFailed(item.getCacheKey(), e.getMessage(), now);
+                FluxDownEngine.offlineMediaWarning(task.getTaskId(), operation(
+                        warning -> serial.execute(() -> complete(task, warning)),
+                        error -> serial.execute(() -> complete(task,
+                                "Unable to verify audio completeness: " + error))));
+            } catch (RuntimeException error) {
+                complete(task, "Unable to verify audio completeness: " + completionError(error));
             }
-        } else {
-            dao().updateProgress(item.getCacheKey(), status(task.getStatus()), task.getDownloadedBytes(),
-                    task.getTotalBytes(), task.getSpeedBytesPerSecond(), now, emptyToNull(task.getErrorMessage()));
+            return;
+        }
+        dao().updateProgress(item.getCacheKey(), status(task.getStatus()), task.getDownloadedBytes(),
+                task.getTotalBytes(), task.getSpeedBytesPerSecond(), now, emptyToNull(task.getErrorMessage()));
+        CacheEvent.refresh();
+        stopIfIdle();
+    }
+
+    private void complete(FluxTaskInfo task, String offlineWarning) {
+        completionChecks.remove(task.getTaskId());
+        if (ignoredTaskIds.contains(task.getTaskId())) return;
+        CacheMetadata item = dao().findByTaskId(task.getTaskId());
+        if (item == null || item.isCompleted() || CacheMetadata.FAILED.equals(item.getStatus())
+                || isTerminating(item.getCacheKey())) return;
+        long now = System.currentTimeMillis();
+        try {
+            if (task.getFileMissing()) throw new IllegalStateException("FluxDown reports the completed file missing");
+            File file = CachePaths.requireReadableFile(new File(task.getSaveDir(), task.getFileName()));
+            String streamMimeType = CacheFileValidator.streamingMimeType(file);
+            if (streamMimeType != null) {
+                String previousUrl = CacheMediaUrl.onLocalServer(item.getOriginalUrl(), Server.get().getAddress(true));
+                boolean retryWithDetectedType = !CacheMediaUrl.forDownload(previousUrl, item.getMimeType())
+                        .equals(CacheMediaUrl.forDownload(previousUrl, streamMimeType));
+                dao().markIncomplete(item.getCacheKey(), streamMimeType,
+                        CacheFileValidator.INCOMPLETE_MESSAGE, now);
+                if (retryWithDetectedType) {
+                    CacheMetadata retry = dao().find(item.getCacheKey());
+                    if (retry != null) {
+                        restart(retry, request(retry), null);
+                        return;
+                    }
+                }
+                CacheEvent.refresh();
+                stopIfIdle();
+                return;
+            }
+            CacheFileValidator.requireOfflineMedia(file);
+            CacheTrackValidator.requireCompleteTracks(file, item.getOriginalUrl(), item.getMimeType());
+            if (!TextUtils.isEmpty(offlineWarning)) {
+                throw new IllegalStateException("Offline cache is incomplete: " + offlineWarning);
+            }
+            long size = file.length();
+            dao().markCompleted(item.getCacheKey(), file.getAbsolutePath(), mime(file, item.getMimeType()),
+                    size, task.getTotalBytes() > 0 ? task.getTotalBytes() : size,
+                    task.getCompletedAt() > 0 ? task.getCompletedAt() * 1000 : now);
+        } catch (Exception e) {
+            dao().markFailed(item.getCacheKey(), completionError(e), now);
         }
         CacheEvent.refresh();
         stopIfIdle();
@@ -342,9 +446,16 @@ public final class CacheRepository implements FluxDownEngine.Listener {
 
     private void create(CacheMetadata metadata, CacheRequest request, EnqueueCallback callback, Operation operation) {
         try {
+            prepareProxySource(request.mediaUrl());
+            String mediaUrl = CacheMediaUrl.onLocalServer(request.mediaUrl(), Server.get().getAddress(true));
+            String downloadUrl = CacheMediaUrl.requireSupportedDownloadUrl(mediaUrl, request.mimeType());
+            if (!downloadUrl.equals(metadata.getOriginalUrl())) {
+                dao().updateOriginalUrl(metadata.getCacheKey(), downloadUrl, System.currentTimeMillis());
+                metadata.setOriginalUrl(downloadUrl);
+            }
             CacheDownloadService.start(App.get());
             startEngine();
-            FluxDownEngine.create(request.mediaUrl(), request.outputFileName(), CachePaths.root().getAbsolutePath(),
+            FluxDownEngine.create(downloadUrl, request.outputFileName(), CachePaths.root().getAbsolutePath(),
                     request.headers(), operation(
                             taskId -> serial.execute(() -> completeCreate(metadata.getCacheKey(), operation, taskId, callback)),
                             message -> serial.execute(() -> failCreate(metadata.getCacheKey(), operation, message, callback))));
@@ -488,6 +599,7 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         // Late command callbacks are intentionally ignored after these tokens are cleared.
         operations.clear();
         pendingTasks.clear();
+        completionChecks.clear();
         for (CacheMetadata item : dao().findActive()) {
             if (!CacheMetadata.PAUSED.equals(item.getStatus())) dao().markFailed(item.getCacheKey(), error, now);
         }
@@ -497,8 +609,24 @@ public final class CacheRepository implements FluxDownEngine.Listener {
 
     public void runIfIdle(Runnable callback) {
         serial.execute(() -> {
-            if (dao().countRunning() == 0 && !hasForegroundOperation()) App.post(callback);
+            if (isEngineIdle()) App.post(callback);
         });
+    }
+
+    public void runCleanupIfCacheInactive(Runnable callback) {
+        if (callback == null) return;
+        long version = idleActionVersion.incrementAndGet();
+        serial.execute(() -> {
+            if (version != idleActionVersion.get()) return;
+            pendingCleanup = new PendingCleanup(version, callback);
+            runPendingCleanupIfCacheInactive();
+        });
+    }
+
+    public void cancelPendingCleanup() {
+        idleActionVersion.incrementAndGet();
+        serial.execute(() -> pendingCleanup = null);
+        Server.get().retain();
     }
 
     private boolean hasForegroundOperation() {
@@ -510,9 +638,81 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         return false;
     }
 
+    private boolean isEngineIdle() {
+        return dao().countRunning() == 0 && !hasForegroundOperation();
+    }
+
+    private boolean isCacheInactive() {
+        return dao().findActive().isEmpty() && !hasForegroundOperation();
+    }
+
+    private void runPendingCleanupIfCacheInactive() {
+        PendingCleanup action = pendingCleanup;
+        if (action == null || action.version() != idleActionVersion.get() || !isCacheInactive()) return;
+        pendingCleanup = null;
+        App.post(() -> {
+            if (action.version() == idleActionVersion.get()) action.callback().run();
+        });
+    }
+
     private static CacheRequest request(CacheMetadata item) {
+        String mediaUrl = recoverProxyUrl(item);
         return new CacheRequest(item.getCacheKey(), item.getTitle(), item.getPoster(), item.getSourceName(),
-                item.getEpisodeName(), item.getOriginalUrl(), headers(item), item.getMimeType(), item.getOutputFileName());
+                item.getEpisodeName(), mediaUrl, headers(item), item.getMimeType(), item.getOutputFileName());
+    }
+
+    private static String recoverProxyUrl(CacheMetadata item) {
+        String url = item.getOriginalUrl();
+        if (!CacheMediaUrl.isLocalProxy(url) || CacheMediaUrl.hasSiteKey(url)) return url;
+        VodConfig.get().ensureLoaded();
+        Site site = findSite(item.getSourceName());
+        return site == null ? url : CacheMediaUrl.withSiteKey(url, site.getKey());
+    }
+
+    private static Site findSite(String sourceName) {
+        if (TextUtils.isEmpty(sourceName)) return null;
+        for (Site site : VodConfig.get().getSites()) {
+            if (sourceName.equals(site.getKey()) || sourceName.equals(site.getName())) return site;
+        }
+        return null;
+    }
+
+    private static boolean proxyEndpointChanged(CacheMetadata item, String serverBaseUrl) {
+        return CacheMediaUrl.isLocalProxy(item.getOriginalUrl())
+                && !CacheMediaUrl.isOnLocalServer(item.getOriginalUrl(), serverBaseUrl);
+    }
+
+    private static CacheRequest withRecoveredMimeType(CacheMetadata previous, CacheRequest request) {
+        if (!TextUtils.isEmpty(request.mimeType())) return request;
+        String mimeType = previous.getMimeType();
+        if (TextUtils.isEmpty(mimeType) && !TextUtils.isEmpty(previous.getLocalPath())) {
+            try {
+                File file = CachePaths.requireReadableFile(new File(previous.getLocalPath()));
+                mimeType = CacheFileValidator.streamingMimeType(file);
+            } catch (Exception ignored) {
+            }
+        }
+        if (TextUtils.isEmpty(mimeType)) return request;
+        return new CacheRequest(request.cacheKey(), request.title(), request.poster(), request.sourceName(),
+                request.episodeName(), request.mediaUrl(), request.headers(), mimeType, "");
+    }
+
+    private static void prepareProxySource(List<CacheMetadata> items) {
+        for (CacheMetadata item : items) {
+            if (!CacheMediaUrl.isLocalProxy(item.getOriginalUrl())) continue;
+            prepareProxySource(item.getOriginalUrl());
+            if (!CacheMediaUrl.hasSiteKey(item.getOriginalUrl())) {
+                Site site = findSite(item.getSourceName());
+                if (site != null) site.recent().spider();
+            }
+        }
+    }
+
+    private static void prepareProxySource(String url) {
+        if (!CacheMediaUrl.isLocalProxy(url)) return;
+        VodConfig.get().ensureLoaded();
+        Server.get().start();
+        if (!Server.get().isRunning()) throw new IllegalStateException("Local media proxy is unavailable");
     }
 
     private static void deleteOwnedFile(CacheMetadata item) {
@@ -521,10 +721,12 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         if (file.exists() && CachePaths.isOwned(file)) file.delete();
     }
 
-    private static boolean completedFileMissing(CacheMetadata item) {
+    private static boolean completedFileInvalid(CacheMetadata item) {
         if (!item.isCompleted()) return false;
         try {
-            CachePaths.requireReadableFile(new File(item.getLocalPath()));
+            File file = CachePaths.requireReadableFile(new File(item.getLocalPath()));
+            CacheFileValidator.requireOfflineMedia(file);
+            CacheTrackValidator.requireCompleteTracks(file, item.getOriginalUrl(), item.getMimeType());
             return false;
         } catch (Exception ignored) {
             return true;
@@ -598,6 +800,11 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         return TextUtils.isEmpty(value) ? null : value;
     }
 
+    private static String completionError(Exception error) {
+        String message = error == null ? null : error.getMessage();
+        return TextUtils.isEmpty(message) ? "Cached file is missing, unreadable, or incomplete" : message;
+    }
+
     private static FluxDownEngine.Callback operation(Consumer<String> success, Consumer<String> error) {
         return new FluxDownEngine.Callback() {
             @Override
@@ -613,7 +820,8 @@ public final class CacheRepository implements FluxDownEngine.Listener {
     }
 
     private void stopIfIdle() {
-        if (dao().countRunning() == 0) App.post(() -> CacheDownloadService.stop(App.get()));
+        if (isEngineIdle()) App.post(() -> CacheDownloadService.stop(App.get()));
+        runPendingCleanupIfCacheInactive();
     }
 
     private static void success(EnqueueCallback callback, CacheMetadata metadata, boolean existed) {

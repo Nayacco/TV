@@ -2,6 +2,7 @@ package com.fongmi.android.tv.cache;
 
 import android.text.TextUtils;
 
+import com.fongmi.android.tv.api.config.VodConfig;
 import com.fongmi.android.tv.bean.History;
 
 import java.net.URI;
@@ -24,6 +25,7 @@ public record CacheRequest(String cacheKey, String title, String poster, String 
         String title = TextUtils.isEmpty(history.getVodName()) ? displayTitle : history.getVodName();
         if (TextUtils.isEmpty(title)) title = "video";
         String fileTitle = title + (TextUtils.isEmpty(history.getVodRemarks()) ? "" : "-" + history.getVodRemarks());
+        mediaUrl = CacheMediaUrl.withSiteKey(mediaUrl, siteKey(history));
         return new CacheRequest(
                 cacheKey,
                 title,
@@ -41,6 +43,15 @@ public record CacheRequest(String cacheKey, String title, String poster, String 
             return history.getSiteName();
         } catch (Exception ignored) {
             return history.getSiteKey();
+        }
+    }
+
+    private static String siteKey(History history) {
+        try {
+            String siteKey = history.getSiteKey();
+            return VodConfig.get().getSite(siteKey).isEmpty() ? "" : siteKey;
+        } catch (Exception ignored) {
+            return "";
         }
     }
 

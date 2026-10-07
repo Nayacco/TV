@@ -24,6 +24,7 @@ import com.fongmi.android.tv.api.config.VodConfig;
 import com.fongmi.android.tv.api.config.WallConfig;
 import com.fongmi.android.tv.bean.Config;
 import com.fongmi.android.tv.cache.CacheActivity;
+import com.fongmi.android.tv.cache.CacheRepository;
 import com.fongmi.android.tv.databinding.ActivityHomeBinding;
 import com.fongmi.android.tv.db.BackupManager;
 import com.fongmi.android.tv.event.ConfigEvent;
@@ -71,6 +72,7 @@ public class HomeActivity extends BaseActivity implements NavigationBarView.OnIt
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        CacheRepository.get().cancelPendingCleanup();
         SplashScreen.installSplashScreen(this);
         super.onCreate(savedInstanceState);
     }
@@ -245,12 +247,16 @@ public class HomeActivity extends BaseActivity implements NavigationBarView.OnIt
 
     @Override
     protected void onDestroy() {
+        BackupManager.backup();
+        CacheRepository.get().runCleanupIfCacheInactive(HomeActivity::clearResources);
+        super.onDestroy();
+    }
+
+    private static void clearResources() {
         LiveConfig.get().clear();
         VodConfig.get().clear();
-        BackupManager.backup();
         OkHttp.get().clear();
         Source.get().exit();
         Server.get().stop();
-        super.onDestroy();
     }
 }

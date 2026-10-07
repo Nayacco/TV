@@ -875,7 +875,7 @@ public class VideoActivity extends PlaybackActivity implements VodPlaybackHost, 
             return;
         }
         try {
-            CacheRequest request = CacheRequest.from(mHistory, player().getMediaTitle(), player().getUrl(), player().getHeaders(), null);
+            CacheRequest request = CacheRequest.from(mHistory, player().getMediaTitle(), player().getUrl(), player().getHeaders(), player().getFormat());
             CacheRepository.get().enqueue(request, new CacheRepository.EnqueueCallback() {
                 @Override
                 public void onSuccess(com.fongmi.android.tv.cache.CacheMetadata metadata, boolean existed) {

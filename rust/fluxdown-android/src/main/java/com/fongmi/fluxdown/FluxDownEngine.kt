@@ -117,6 +117,40 @@ object FluxDownEngine {
         command(callback) { it.delete(taskId, deleteFiles); null }
 
     @JvmStatic
+    fun offlineMediaWarning(taskId: String, callback: Callback) = command(callback) { session ->
+        var warning = ""
+        var beforeId: Long? = null
+        var truncated = false
+        do {
+            val params = JSONObject().put("taskId", taskId).put("limit", 500)
+            beforeId?.let { params.put("beforeId", it) }
+            val page = JSONObject(session.call("daemon.task.activity", params.toString()))
+            val entries = page.optJSONArray("entries")
+                ?: throw IllegalStateException("FluxDown returned invalid task activity")
+            truncated = truncated || page.optBoolean("truncated")
+            for (index in 0 until entries.length()) {
+                val entry = entries.optJSONObject(index) ?: continue
+                if (!entry.optString("kind").equals("warning", ignoreCase = true)) continue
+                val message = entry.optString("message")
+                val lower = message.lowercase()
+                if ((message.contains("音频") && (lower.contains("ffmpeg") || message.contains("没有声音"))) ||
+                    (lower.contains("audio") && lower.contains("ffmpeg"))) {
+                    warning = message
+                }
+            }
+            if (warning.isNotEmpty() || !page.optBoolean("hasMore")) break
+            if (entries.length() == 0) throw IllegalStateException("FluxDown task activity pagination stalled")
+            val nextBeforeId = entries.getJSONObject(0).getLong("id")
+            if (nextBeforeId == beforeId) throw IllegalStateException("FluxDown task activity cursor did not advance")
+            beforeId = nextBeforeId
+        } while (true)
+        if (warning.isEmpty() && truncated) {
+            warning = "FluxDown task activity was truncated; audio completeness cannot be proven"
+        }
+        warning
+    }
+
+    @JvmStatic
     fun stop() {
         val current = synchronized(lock) {
             signalJob?.cancel()
