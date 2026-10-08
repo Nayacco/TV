@@ -45,7 +45,7 @@ public final class FFmpegRuntime {
         } finally {
             if (linked) {
                 try {
-                    Os.unlink(temporary.getAbsolutePath());
+                    Os.remove(temporary.getAbsolutePath());
                 } catch (ErrnoException error) {
                     if (error.errno != OsConstants.ENOENT) {
                         throw new IOException("Unable to remove temporary FFmpeg link", error);

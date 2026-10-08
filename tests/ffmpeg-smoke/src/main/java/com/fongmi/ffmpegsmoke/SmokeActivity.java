@@ -71,7 +71,7 @@ public final class SmokeActivity extends Activity {
                 "Runtime link does not resolve to the packaged executable");
         require(FFmpegRuntime.prepare(new File(getFilesDir(), "fluxdown").getAbsolutePath(), nativeDir).equals(ffmpeg),
                 "Runtime preparation must be idempotent");
-        Os.unlink(ffmpeg.getAbsolutePath());
+        Os.remove(ffmpeg.getAbsolutePath());
         Os.symlink(new File(nativeDir, "previous-installation-libffmpeg.so").getAbsolutePath(), ffmpeg.getAbsolutePath());
         ffmpeg = FFmpegRuntime.prepare(new File(getFilesDir(), "fluxdown").getAbsolutePath(), nativeDir);
         require(ffmpeg.getCanonicalPath().equals(new File(nativeDir, "libffmpeg.so").getCanonicalPath()),

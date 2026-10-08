@@ -17,6 +17,19 @@ mkdir -p "${log_dir}"
 command -v adb >/dev/null || { echo "adb is required on PATH" >&2; exit 2; }
 adb get-state >/dev/null
 
+fail_with_diagnostics() {
+  local status=$?
+  trap - ERR
+  local diagnostic
+  diagnostic="$(tail -n 120 "${log_dir}/gradle.log" "${log_dir}/result.txt" 2>/dev/null | head -c 12000 || true)"
+  diagnostic="${diagnostic//'%'/'%25'}"
+  diagnostic="${diagnostic//$'\r'/'%0D'}"
+  diagnostic="${diagnostic//$'\n'/'%0A'}"
+  echo "::error title=Android FFmpeg smoke test failed::${diagnostic}"
+  exit "${status}"
+}
+trap fail_with_diagnostics ERR
+
 bash "${repo_dir}/gradlew" --no-daemon --console=plain \
   -p "${project_dir}" \
   "-Pfluxdown.ffmpegDir=${native_dir}" \
@@ -48,11 +61,11 @@ for ((attempt = 0; attempt < 60; attempt++)); do
   if [[ "${result}" == FAILURE$'\n'* ]]; then
     printf '%s\n' "${result}" | tee "${log_dir}/result.txt" >&2
     adb logcat -d -s 'FFmpegSmoke:*' 'AndroidRuntime:E' > "${log_dir}/logcat.txt" || true
-    exit 1
+    false
   fi
   sleep 1
 done
 
 echo "Timed out after 60 seconds waiting for the app-domain FFmpeg smoke test" | tee "${log_dir}/result.txt" >&2
 adb logcat -d -s 'FFmpegSmoke:*' 'AndroidRuntime:E' > "${log_dir}/logcat.txt" || true
-exit 1
+false
