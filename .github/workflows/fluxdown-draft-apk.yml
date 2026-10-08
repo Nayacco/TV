@@ -43,9 +43,16 @@ jobs:
           distribution: jetbrains
           java-version: "21"
           java-package: jdk
-          cache: gradle
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Restore rolling Gradle dependencies and task-output cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # This long-lived non-default branch must also save each commit's cache.
+          # setup-gradle isolates by job and restores the latest compatible entry.
+          cache-read-only: false
+          cache-cleanup: on-success
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v6
@@ -53,6 +60,10 @@ jobs:
           python-version: "3.10"
           cache: pip
           cache-dependency-path: chaquo/requirements.txt
+
+      - name: Test safe Gradle cache reporting
+        shell: bash
+        run: python -m unittest discover -s tests/ci -p test_gradle_build_report.py -v
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -180,6 +191,8 @@ jobs:
             exit 1
           fi
 
+          echo "::add-mask::${store_password}"
+
           python - "${ANDROID_HOME}" "${ANDROID_NDK_HOME}" "${keystore}" "${key_alias}" "${store_password}" <<'PY'
           import sys
 
@@ -206,18 +219,21 @@ jobs:
           echo "signing_persistent=${signing_persistent}" >> "${GITHUB_OUTPUT}"
 
       - name: Test cache contracts and build optimized release APKs
+        id: gradle-build
         shell: bash
         run: |
           set +e
           gradle_log="${RUNNER_TEMP}/gradle.log"
+          build_started="${SECONDS}"
 
-          ./gradlew --no-daemon --console=plain \
+          ./gradlew --no-daemon --console=plain --build-cache --profile \
             -Pfluxdown.ffmpegDir="${GITHUB_WORKSPACE}/build/ffmpeg/jniLibs" \
             :app:testLeanbackDebugUnitTest \
             :app:assembleLeanbackRelease \
             :app:assembleMobileRelease \
             2>&1 | tee "${gradle_log}"
           gradle_status="${PIPESTATUS[0]}"
+          echo "elapsed_seconds=$((SECONDS - build_started))" >> "${GITHUB_OUTPUT}"
 
           if [[ "${gradle_status}" -ne 0 ]]; then
             diagnostic="$(
@@ -239,6 +255,25 @@ jobs:
           fi
 
           exit "${gradle_status}"
+
+      - name: Report Gradle and native task cache usage
+        if: always() && steps.gradle-build.outcome != 'skipped'
+        shell: bash
+        env:
+          GRADLE_BUILD_SECONDS: ${{ steps.gradle-build.outputs.elapsed_seconds }}
+        run: python scripts/report-gradle-build.py "${RUNNER_TEMP}/gradle.log"
+
+      - name: Preserve sanitized build timing and test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gradle-build-reports-${{ github.sha }}
+          path: |
+            build/ci-reports/
+            app/build/reports/tests/
+            app/build/test-results/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Collect and verify APKs
         id: collect
@@ -324,9 +359,15 @@ jobs:
           distribution: jetbrains
           java-version: "21"
           java-package: jdk
-          cache: gradle
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Restore rolling smoke-test Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # The action's key includes this job, so smoke and APK state stay separate.
+          cache-read-only: false
+          cache-cleanup: on-success
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4

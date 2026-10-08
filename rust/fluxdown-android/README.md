@@ -52,3 +52,29 @@ and callback methods run on the adapter's IO coroutine scope, so UI consumers
 must dispatch to their own main-thread mechanism.
 
 No generated binding, native library, or patched upstream source is checked in.
+
+## Build cache
+
+Native compilation and UniFFI generation support Gradle's task-output cache.
+The cache tracks Rust sources and configuration, compiler and cargo-ndk versions,
+the NDK revision, ABI, Android platform and build profile. APK signing properties
+are deliberately excluded. Changing only application Java/Kotlin code or the
+signing key therefore does not invalidate unchanged native outputs. Custom
+compiler or linker overrides conservatively disable this reuse.
+
+The draft-APK workflow uses `setup-gradle` to restore the latest compatible Gradle
+cache and save updated state for each commit. The first run after changing the
+native task implementation or toolchain needs to populate that cache. Subsequent
+runs report native `FROM-CACHE`/rebuild counts, per-task timing and a sanitized
+Gradle log in the job summary and `gradle-build-reports` artifact.
+
+From the repository root on Windows, verify the actual task classes without an
+Android SDK or Rust compiler:
+
+```powershell
+./scripts/test-fluxdown-build-cache.ps1 -JavaHome 'C:/path/to/jdk-21'
+```
+
+This test uses deterministic fake compilers with the real Gradle build cache to
+check restoration, input invalidation and signing independence. It is a cache
+contract test, not a substitute for the CI Android builds and media smoke test.

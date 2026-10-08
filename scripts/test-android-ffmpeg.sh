@@ -30,7 +30,7 @@ fail_with_diagnostics() {
 }
 trap fail_with_diagnostics ERR
 
-bash "${repo_dir}/gradlew" --no-daemon --console=plain \
+bash "${repo_dir}/gradlew" --no-daemon --console=plain --build-cache \
   -p "${project_dir}" \
   "-Pfluxdown.ffmpegDir=${native_dir}" \
   assembleDebug 2>&1 | tee "${log_dir}/gradle.log"

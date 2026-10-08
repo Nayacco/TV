@@ -1,4 +1,5 @@
-import java.io.StringReader
+import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
 import java.util.Properties
 import javax.inject.Inject
 
@@ -36,10 +37,8 @@ object FluxRust {
         return requested
     }
 
-    fun ndkHome(localProperties: String?, sdkDir: File): File {
-        val configured = localProperties
-            ?.let { Properties().apply { load(StringReader(it)) }.getProperty("ndk.dir") }
-            ?.takeIf(String::isNotBlank)
+    fun ndkHome(configuredNdk: String?, sdkDir: File): File {
+        val configured = configuredNdk?.takeIf(String::isNotBlank)
             ?: System.getenv("ANDROID_NDK_HOME")?.takeIf(String::isNotBlank)
             ?: System.getenv("ANDROID_NDK_ROOT")?.takeIf(String::isNotBlank)
         if (configured != null) {
@@ -72,30 +71,132 @@ object FluxRust {
         "${System.getProperty("user.home")}/.cargo/bin",
     ).filter { File(it).isDirectory }
 
-    fun cargo(explicit: String?): String = cargoBins(explicit)
+    fun tool(name: String, explicit: String?): String = cargoBins(explicit)
         .map {
             File(
                 it,
-                if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "cargo.exe" else "cargo",
+                if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "$name.exe" else name,
             )
         }
-        .firstOrNull { it.isFile }?.absolutePath ?: "cargo"
+        .firstOrNull { it.isFile }?.absolutePath ?: name
+
+    fun cargo(explicit: String?): String = tool("cargo", explicit)
 
     fun path(explicit: String?): String =
         (cargoBins(explicit) + listOfNotNull(System.getenv("PATH"))).joinToString(File.pathSeparator)
+
+    // Only compilation inputs belong in the native key, never signing values, CI IDs or tokens.
+    fun compilationEnvironment(): Map<String, String> {
+        val names = setOf(
+            "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTDOCFLAGS", "CARGO_ENCODED_RUSTDOCFLAGS",
+            "RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTUP_TOOLCHAIN",
+            "CARGO_BUILD_TARGET", "CARGO_BUILD_RUSTFLAGS", "CARGO_BUILD_RUSTC",
+            "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_INCREMENTAL", "CARGO_INCREMENTAL", "SOURCE_DATE_EPOCH",
+            "CC", "CXX", "AR", "RANLIB", "NM", "STRIP", "OBJCOPY",
+            "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "HOST_CC", "HOST_CXX", "TARGET_CC", "TARGET_CXX",
+            "PKG_CONFIG", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "PKG_CONFIG_SYSROOT_DIR", "PKG_CONFIG_ALLOW_CROSS",
+            "FLUXDOWN_APP_VERSION", "FLUXDOWN_ANALYTICS_APP_KEY", "FLUXCLOUD_BASE_URL",
+        )
+        val flags = Regex("(CC|CXX|AR|RANLIB|CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS)_.+|.+_(CFLAGS|CXXFLAGS|CPPFLAGS|LDFLAGS)")
+        return System.getenv().filterKeys { name ->
+            name in names || name.startsWith("CARGO_PROFILE_") ||
+                (name.startsWith("CARGO_TARGET_") && (name.endsWith("_RUSTFLAGS") || name.endsWith("_LINKER"))) ||
+                name.startsWith("CARGO_NDK_") || flags.matches(name)
+        }.toSortedMap()
+    }
+
+    // Cargo searches configuration in the working directory's ancestors and CARGO_HOME.
+    // rustc -vV below identifies the selected toolchain, including rustup overrides.
+    fun configurations(workspace: File): List<File> = buildList {
+        var current: File? = workspace.absoluteFile
+        while (current != null) {
+            val directory = current
+            listOf(".cargo/config", ".cargo/config.toml", "rust-toolchain", "rust-toolchain.toml")
+                .map { File(directory, it) }.filter(File::isFile).forEach(::add)
+            current = directory.parentFile
+        }
+        val cargoHome = System.getenv("CARGO_HOME")?.takeIf(String::isNotBlank)?.let(::File)
+            ?: File(System.getProperty("user.home"), ".cargo")
+        listOf("config", "config.toml").map { File(cargoHome, it) }.filter(File::isFile).forEach(::add)
+    }.distinct()
+
+    fun standardTools(environment: Map<String, String>, configuration: Set<File>): Boolean {
+        // A custom wrapper/compiler can change in place without changing its path/version.
+        // Do not reuse either local or remote outputs unless the normal identified tools are used.
+        val customTool = Regex("(RUSTC(_.*)?|CARGO_BUILD_RUSTC(_.*)?|CC(_.*)?|CXX(_.*)?|AR(_.*)?|RANLIB(_.*)?|NM|STRIP|OBJCOPY|HOST_CC|HOST_CXX|TARGET_CC|TARGET_CXX|PKG_CONFIG(_PATH|_LIBDIR|_SYSROOT_DIR)?|CARGO_TARGET_.+_LINKER)")
+        if (environment.any { (name, value) -> value.isNotBlank() && customTool.matches(name) }) return false
+        val customConfig = Regex("(^|[^A-Za-z0-9_-])(rustc|rustc-wrapper|rustc-workspace-wrapper|linker|ar)([^A-Za-z0-9_-]|$)")
+        return configuration.none { file ->
+            file.isFile && file.readLines().any { line ->
+                !line.trimStart().startsWith('#') && customConfig.containsMatchIn(line.substringBefore('='))
+            }
+        }
+    }
 }
 
-abstract class FluxCargoNdk @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
+abstract class FluxRustTask @Inject constructor(@get:Internal protected val exec: ExecOperations) : DefaultTask() {
     @get:Internal abstract val workspaceRoot: DirectoryProperty
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val rustSources: ConfigurableFileCollection
+    @get:InputFiles @get:PathSensitive(PathSensitivity.NONE)
+    abstract val toolConfiguration: ConfigurableFileCollection
+    @get:Internal abstract val cargoBin: Property<String>
+
+    @get:Input val compilationEnvironment: Map<String, String>
+        get() = FluxRust.compilationEnvironment()
+
+    // Preserve Cargo's configuration precedence without keying the absolute checkout path.
+    @get:Input val toolConfigurationOrder: List<String>
+        get() = toolConfiguration.files.filter(File::isFile).map { file ->
+            val hash = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+                .joinToString("") { "%02x".format(it) }
+            "${file.name}:$hash"
+        }
+
+    @get:Input open val toolchainIdentity: Map<String, String>
+        get() = mapOf(
+            "host-os" to System.getProperty("os.name"),
+            "host-arch" to System.getProperty("os.arch"),
+            "cargo" to version(FluxRust.cargo(cargoBin.orNull), "-vV"),
+            "rustc" to version(FluxRust.tool("rustc", cargoBin.orNull), "-vV"),
+        )
+
+    init {
+        outputs.cacheIf("Only identified standard Rust/NDK tools can reuse compiled outputs") {
+            FluxRust.standardTools(compilationEnvironment, toolConfiguration.files)
+        }
+        outputs.upToDateWhen { FluxRust.standardTools(compilationEnvironment, toolConfiguration.files) }
+    }
+
+    protected fun version(vararg command: String): String {
+        val output = ByteArrayOutputStream()
+        exec.exec {
+            workingDir = workspaceRoot.get().asFile
+            environment("PATH", FluxRust.path(cargoBin.orNull))
+            commandLine(*command)
+            standardOutput = output
+            errorOutput = output
+        }
+        return output.toString(Charsets.UTF_8.name()).trim().also {
+            check(it.isNotEmpty()) { "FluxDown build tool returned no version: ${command.first()}" }
+        }
+    }
+}
+
+@CacheableTask
+abstract class FluxCargoNdk @Inject constructor(exec: ExecOperations) : FluxRustTask(exec) {
     @get:Input abstract val abis: Property<String>
     @get:Input abstract val release: Property<Boolean>
     @get:Input abstract val platform: Property<Int>
-    @get:Input @get:Optional abstract val localProperties: Property<String>
-    @get:Input abstract val sdkDir: Property<String>
-    @get:Input @get:Optional abstract val cargoBin: Property<String>
+    @get:Internal abstract val ndkDirectory: DirectoryProperty
     @get:OutputDirectory abstract val outputDir: DirectoryProperty
+
+    @get:Input override val toolchainIdentity: Map<String, String>
+        get() = super.toolchainIdentity + mapOf(
+            "cargo-ndk" to version(FluxRust.cargo(cargoBin.orNull), "ndk", "--version"),
+            "ndk" to File(ndkDirectory.get().asFile, "source.properties").readText(),
+        )
 
     @TaskAction
     fun buildNative() {
@@ -103,7 +204,7 @@ abstract class FluxCargoNdk @Inject constructor(private val exec: ExecOperations
         output.deleteRecursively()
         output.mkdirs()
         val requestedAbis = FluxRust.parseAbis(abis.get())
-        val ndk = FluxRust.ndkHome(localProperties.orNull, File(sdkDir.get()))
+        val ndk = ndkDirectory.get().asFile
         val command = buildList {
             add(FluxRust.cargo(cargoBin.orNull))
             add("ndk")
@@ -129,14 +230,13 @@ abstract class FluxCargoNdk @Inject constructor(private val exec: ExecOperations
     }
 }
 
-abstract class FluxUniffiBindgen @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
-    @get:Internal abstract val workspaceRoot: DirectoryProperty
+@CacheableTask
+abstract class FluxUniffiBindgen @Inject constructor(exec: ExecOperations) : FluxRustTask(exec) {
     @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val nativeLibrary: DirectoryProperty
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val bindgenConfig: ConfigurableFileCollection
     @get:Input abstract val abis: Property<String>
-    @get:Input @get:Optional abstract val cargoBin: Property<String>
     @get:OutputDirectory abstract val outputDir: DirectoryProperty
 
     @TaskAction
@@ -160,6 +260,7 @@ abstract class FluxUniffiBindgen @Inject constructor(private val exec: ExecOpera
     }
 }
 
+@CacheableTask
 abstract class FluxFFmpegBundle @Inject constructor(private val files: FileSystemOperations) : DefaultTask() {
     @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val nativeInput: DirectoryProperty
@@ -215,20 +316,37 @@ val configuredCargoBin = providers.gradleProperty("fluxdown.cargoBin")
 val configuredFfmpeg = providers.gradleProperty("fluxdown.ffmpegDir")
     .map { rootProject.file(it) }
     .orElse(rootProject.layout.buildDirectory.dir("ffmpeg/jniLibs").map { it.asFile })
-val localPropertiesText = providers.provider {
-    rootProject.file("local.properties").takeIf { it.isFile }?.readText() ?: ""
+// local.properties also contains signing secrets and an ephemeral key path. Read only ndk.dir,
+// and use the installed NDK revision (not its machine-specific path) as the compilation input.
+val configuredNdk = providers.provider {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (!localPropertiesFile.isFile) null else Properties().apply {
+        localPropertiesFile.inputStream().use { load(it) }
+    }.getProperty("ndk.dir")
+}
+val configuredNdkDirectory = providers.provider {
+    FluxRust.ndkHome(configuredNdk.orNull, androidComponents.sdkComponents.sdkDirectory.get().asFile)
+}
+
+fun FluxRustTask.configureSources() {
+    workspaceRoot.set(fluxWorkspace)
+    rustSources.from(fileTree(fluxWorkspace) {
+        include(
+            "Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", ".cargo/**",
+            "native/**", "crates/**", "third_party/**", "scripts/desktop-dev/Cargo.toml",
+            // native/engine/build.rs reads the application version from this file.
+            "pubspec.yaml",
+        )
+        exclude("**/target/**")
+    })
+    toolConfiguration.from(providers.provider { FluxRust.configurations(fluxWorkspace.asFile) })
+    cargoBin.set(configuredCargoBin)
 }
 
 fun FluxCargoNdk.configureCommon() {
-    workspaceRoot.set(fluxWorkspace)
-    rustSources.from(fileTree(fluxWorkspace) {
-        include("Cargo.toml", "Cargo.lock", ".cargo/**", "native/**", "crates/**", "third_party/**")
-        exclude("**/target/**")
-    })
+    configureSources()
     platform.set(24)
-    localProperties.set(localPropertiesText)
-    sdkDir.set(androidComponents.sdkComponents.sdkDirectory.map { it.asFile.absolutePath })
-    cargoBin.set(configuredCargoBin)
+    ndkDirectory.fileProvider(configuredNdkDirectory)
 }
 
 // Release .so files are stripped, so generate bindings from a shared unstripped debug build.
@@ -264,11 +382,10 @@ androidComponents {
             outputDir.set(layout.buildDirectory.dir("intermediates/fluxdown/${variant.name}/jniLibs"))
         }
         val bindgen = tasks.register<FluxUniffiBindgen>("fluxUniffiBindgen$capitalized") {
-            workspaceRoot.set(fluxWorkspace)
+            configureSources()
             nativeLibrary.set(fluxBindingsLibrary.flatMap(FluxCargoNdk::outputDir))
             bindgenConfig.from(fluxWorkspace.file("native/mobile/uniffi.toml"))
             abis.set(configuredAbis)
-            cargoBin.set(configuredCargoBin)
             outputDir.set(layout.buildDirectory.dir("generated/fluxdown/${variant.name}/kotlin"))
         }
         checkNotNull(variant.sources.jniLibs) { "AGP did not expose generated jniLibs for ${variant.name}" }
