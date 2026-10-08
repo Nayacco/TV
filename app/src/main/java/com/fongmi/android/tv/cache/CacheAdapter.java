@@ -2,6 +2,7 @@ package com.fongmi.android.tv.cache;
 
 import android.content.Context;
 import android.text.TextUtils;
+import android.text.TextUtils.TruncateAt;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -14,6 +15,7 @@ import com.fongmi.android.tv.R;
 import com.fongmi.android.tv.databinding.AdapterCacheBinding;
 import com.fongmi.android.tv.utils.Formatters;
 import com.fongmi.android.tv.utils.ImgUtil;
+import com.fongmi.android.tv.utils.Util;
 
 import java.time.Instant;
 import java.time.ZoneId;
@@ -87,7 +89,7 @@ public final class CacheAdapter extends RecyclerView.Adapter<CacheAdapter.ViewHo
             binding.status.setText(status(context, item.getStatus()));
             binding.size.setText(context.getString(R.string.cache_size, bytes(item.getDownloadedBytes()), item.getTotalBytes() > 0 ? bytes(item.getTotalBytes()) : context.getString(R.string.cache_unknown)));
             binding.speed.setText(context.getString(R.string.cache_speed, bytes(item.getSpeedBytesPerSecond())));
-            binding.location.setText(location(context, item));
+            bindLocation(context, item);
             binding.created.setText(context.getString(R.string.cache_created, time(context, item.getCreateTime())));
             binding.completed.setVisibility(item.getCompleteTime() == null ? View.GONE : View.VISIBLE);
             if (item.getCompleteTime() != null) binding.completed.setText(context.getString(R.string.cache_completed, time(context, item.getCompleteTime())));
@@ -98,6 +100,21 @@ public final class CacheAdapter extends RecyclerView.Adapter<CacheAdapter.ViewHo
             binding.getRoot().setOnClickListener(view -> {
                 if (item.isCompleted()) listener.onPlay(item);
             });
+        }
+
+        private void bindLocation(Context context, CacheMetadata item) {
+            boolean hasError = !TextUtils.isEmpty(item.getErrorMessage());
+            binding.location.setText(location(context, item));
+            binding.location.setMaxLines(hasError ? Integer.MAX_VALUE : 2);
+            binding.location.setEllipsize(hasError ? null : TruncateAt.MIDDLE);
+            View.OnLongClickListener copyError = hasError ? view -> {
+                Util.copy(context.getString(R.string.cache_error, item.getErrorMessage()));
+                return true;
+            } : null;
+            binding.location.setOnLongClickListener(copyError);
+            binding.location.setLongClickable(hasError);
+            binding.getRoot().setOnLongClickListener(copyError);
+            binding.getRoot().setLongClickable(hasError);
         }
 
         private void bindProgress(Context context, CacheMetadata item) {

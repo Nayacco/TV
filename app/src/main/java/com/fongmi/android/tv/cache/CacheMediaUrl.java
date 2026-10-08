@@ -35,7 +35,8 @@ public final class CacheMediaUrl {
         String suffix = streamSuffix(mimeType);
         if (suffix.isEmpty() || hasStreamSuffix(downloadUrl, suffix)) return downloadUrl;
         String protocol = ".mpd".equals(suffix) ? "DASH" : "HLS";
-        throw new IllegalArgumentException(protocol + " source uses an opaque URL that FluxDown cannot cache for offline playback");
+        throw new IllegalArgumentException(protocol + " source uses an opaque URL that FluxDown cannot cache for offline playback"
+                + "\nURL: " + downloadUrl + "\nMIME type: " + mimeType);
     }
 
     public static boolean isAdaptiveStream(String url, String mimeType) {

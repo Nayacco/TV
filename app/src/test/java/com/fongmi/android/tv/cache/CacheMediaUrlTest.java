@@ -44,6 +44,35 @@ public class CacheMediaUrlTest {
     }
 
     @Test
+    public void opaqueHlsErrorIncludesCompleteUrlAndMimeType() {
+        String url = "https://media.example/play.php?url=https%3A%2F%2Fcdn.example%2Fmovie.m3u8&token="
+                + "a".repeat(256) + "#part";
+        String mimeType = "application/x-mpegURL; charset=utf-8";
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> CacheMediaUrl.requireSupportedDownloadUrl(url, mimeType));
+        assertEquals("HLS source uses an opaque URL that FluxDown cannot cache for offline playback"
+                + "\nURL: " + url + "\nMIME type: " + mimeType, error.getMessage());
+    }
+
+    @Test
+    public void opaqueDashErrorIncludesCompleteUrlAndMimeType() {
+        String url = "https://media.example/play?id=42&url=movie%2Empd";
+        String mimeType = "application/dash+xml";
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> CacheMediaUrl.requireSupportedDownloadUrl(url, mimeType));
+        assertEquals("DASH source uses an opaque URL that FluxDown cannot cache for offline playback"
+                + "\nURL: " + url + "\nMIME type: " + mimeType, error.getMessage());
+    }
+
+    @Test
+    public void keepsSupportedDownloadUrlsWorking() {
+        String hls = "https://media.example/movie.m3u8?token=42";
+        assertEquals(hls, CacheMediaUrl.requireSupportedDownloadUrl(hls, "application/x-mpegURL"));
+        assertEquals("http://127.0.0.1:9978/proxy.m3u8?do=play&id=42",
+                CacheMediaUrl.requireSupportedDownloadUrl("http://127.0.0.1:9978/proxy?do=play&id=42", "application/x-mpegURL"));
+    }
+
+    @Test
     public void addsEncodedCacheBindingWithoutChangingUpstreamRouting() {
         String source = "http://127.0.0.1:9978/proxy?do=js&id=42#part";
         String expected = "http://127.0.0.1:9978/proxy?do=js&id=42&_cacheSiteKey=%E7%AB%99%E7%82%B9%20A#part";
