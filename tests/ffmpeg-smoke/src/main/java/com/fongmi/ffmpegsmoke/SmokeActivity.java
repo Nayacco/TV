@@ -10,6 +10,8 @@ import android.widget.TextView;
 
 import com.fongmi.fluxdown.FFmpegRuntime;
 import com.fongmi.fluxdown.FFmpegProbe;
+import com.fongmi.fluxdown.FFmpegTsNormalizer;
+import com.fongmi.fluxdown.PngTsCleaner;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -120,6 +122,81 @@ public final class SmokeActivity extends Activity {
         require(tsProbe.contains("Input #0, mpegts") && tsProbe.contains("Video:") && tsProbe.contains("Audio:"),
                 "Production metadata probe did not identify TS streams: " + tsProbe);
         summary.append("Production read-only metadata probe identifies actual TS container/streams: OK\n");
+        requirePngWrappedTs(ffmpeg, ts);
+    }
+
+    private void requirePngWrappedTs(File ffmpeg, File ts) throws Exception {
+        File wrapped = new File(work, "png-wrapped.ts");
+        File cleaned = new File(work, "png-cleaned.ts");
+        require(ts.length() % 188 == 0 && ts.length() >= 10 * 188, "TS fixture must contain complete packets");
+        long split = ts.length() / 188 / 2 * 188;
+        try (FileInputStream input = new FileInputStream(ts); FileOutputStream output = new FileOutputStream(wrapped)) {
+            output.write(pngPrefix(126));
+            copyBytes(input, output, split);
+            output.write(pngPrefix(211));
+            copyBytes(input, output, ts.length() - split);
+        }
+        byte[] wrappedDigest = fileDigest(wrapped);
+        require(PngTsCleaner.hasPngPrefix(wrapped), "Wrapped fixture must exercise the production PNG detection");
+        String before = FFmpegProbe.inspect(ffmpeg, wrapped);
+        require(before.contains("png_pipe") && before.contains("not on whitelist"),
+                "Wrapped fixture did not reproduce the original FFmpeg detection failure: " + before);
+        PngTsCleaner.clean(wrapped, cleaned);
+        require(Arrays.equals(fileDigest(ts), fileDigest(cleaned)), "Cleaner lost or altered TS packet bytes");
+        require(Arrays.equals(wrappedDigest, fileDigest(wrapped)), "Cleaner changed its original input");
+
+        try (FFmpegTsNormalizer.Prepared prepared = FFmpegTsNormalizer.prepare(ffmpeg, wrapped,
+                SmokeActivity::requireAndroidTracks)) {
+            require(Arrays.equals(wrappedDigest, fileDigest(wrapped)), "Prepare replaced the source before commit");
+            requireAndroidTracks(prepared.getOutput());
+            run(ffmpeg, "-v", "error", "-xerror", "-f", "mpegts", "-i", prepared.getOutput().getAbsolutePath(),
+                    "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-f", "null", "-");
+            prepared.commit();
+        }
+        require(!PngTsCleaner.hasPngPrefix(wrapped), "Committed media still begins with a PNG prefix");
+        requireAndroidTracks(wrapped);
+        String after = FFmpegProbe.inspect(ffmpeg, wrapped);
+        require(after.contains("Input #0, mpegts") && after.contains("Video:") && after.contains("Audio:"),
+                "Normalized file does not contain both TS streams: " + after);
+        summary.append("Production PNG multi-segment cleanup: byte-identical TS, forced stream-copy remux, Android tracks/samples, commit: OK\n");
+
+        File truncated = new File(work, "png-truncated.ts");
+        try (FileInputStream input = new FileInputStream(ts); FileOutputStream output = new FileOutputStream(truncated)) {
+            output.write(pngPrefix(126));
+            copyBytes(input, output, ts.length() - 1);
+        }
+        byte[] truncatedDigest = fileDigest(truncated);
+        int filesBefore = work.list().length;
+        boolean rejected = false;
+        try (FFmpegTsNormalizer.Prepared ignored = FFmpegTsNormalizer.prepare(ffmpeg, truncated,
+                SmokeActivity::requireAndroidTracks)) {
+            throw new IOException("Normalizer accepted a truncated TS packet");
+        } catch (IOException expected) {
+            require(expected.getMessage().contains("Truncated TS packet"), "Unexpected rejection: " + expected);
+            rejected = true;
+        }
+        require(rejected && Arrays.equals(truncatedDigest, fileDigest(truncated)), "Rejected input was changed");
+        require(work.list().length == filesBefore, "Failed normalization left temporary files");
+        summary.append("Production truncated TS rejection: unchanged original, no temporary-file leak: OK\n");
+    }
+
+    private static byte[] pngPrefix(int length) {
+        byte[] prefix = new byte[length];
+        byte[] header = {(byte) 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+                0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52,
+                0, 0, 3, 0x20, 0, 0, 3, 0x20, 8, 3, 0, 0, 0, (byte) 0xec, (byte) 0xae, (byte) 0xf6};
+        System.arraycopy(header, 0, prefix, 0, header.length);
+        return prefix;
+    }
+
+    private static void copyBytes(InputStream input, FileOutputStream output, long remaining) throws IOException {
+        byte[] buffer = new byte[4096];
+        while (remaining > 0) {
+            int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+            require(count > 0, "Fixture input was truncated");
+            output.write(buffer, 0, count);
+            remaining -= count;
+        }
     }
 
     private void requireReadOnlyProbe(File ffmpeg, File combined) throws IOException {
@@ -274,7 +351,7 @@ public final class SmokeActivity extends Activity {
                 if (mime.startsWith("video/")) video = true;
                 if (mime.startsWith("audio/")) audio = true;
             }
-            require(video && audio, "Merged MP4 must have both video and audio tracks");
+            require(video && audio, "Completed media must have both video and audio tracks");
         } finally {
             extractor.release();
         }

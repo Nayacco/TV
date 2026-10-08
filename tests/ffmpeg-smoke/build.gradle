@@ -11,6 +11,8 @@ def runtimeDir = layout.buildDirectory.dir('generated/runtime')
 def copyRuntime = tasks.register('copyFFmpegRuntime', Sync) {
     from '../../rust/fluxdown-android/src/main/java/com/fongmi/fluxdown/FFmpegRuntime.java'
     from '../../rust/fluxdown-android/src/main/java/com/fongmi/fluxdown/FFmpegProbe.java'
+    from '../../rust/fluxdown-android/src/main/java/com/fongmi/fluxdown/PngTsCleaner.java'
+    from '../../rust/fluxdown-android/src/main/java/com/fongmi/fluxdown/FFmpegTsNormalizer.java'
     into runtimeDir.map { it.dir('com/fongmi/fluxdown') }
 }
 

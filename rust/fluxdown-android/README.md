@@ -53,6 +53,34 @@ must dispatch to their own main-thread mechanism.
 
 No generated binding, native library, or patched upstream source is checked in.
 
+## PNG-wrapped HLS segments
+
+New download completion checks run on a separate media worker, while the cache
+service stays active. If the merged file starts with a PNG signature,
+`PngTsCleaner` removes each recognized segment prefix with bounded memory. It
+confirms five complete, valid 188-byte MPEG-TS packet headers within a 64 KiB
+prefix window, then copies aligned packets unchanged. PNG-like bytes inside a
+packet payload are not removed. Unknown boundary data, short segments which
+cannot be confirmed, and truncated packets fail rather than silently lose data.
+
+`FFmpegTsNormalizer` then explicitly reads MPEG-TS and stream-copies both video
+and audio into one TS file, without re-encoding. It requires a successful FFmpeg
+run and application track validation; these checks do not independently prove
+that a remote playlist contained every episode segment. The download engine's
+completion and separate-audio checks remain required.
+
+Processing uses private temporary files beside the source and needs free space
+for roughly two additional copies plus a small margin. Cancellation interrupts
+processing. Only the serialized, still-current task may install validated output.
+Installation uses an original-file backup and rollback on rename failure, not a
+crash-atomic two-file transaction. Failed preparations keep the original and
+remove their temporary outputs. Historical failed caches are not repaired.
+
+JVM regressions cover packet cleanup, interrupted/truncated inputs, process
+failures and commit rollback. The existing Android FFmpeg smoke job also wraps a
+real generated TS fixture in multiple PNG prefixes, checks byte-exact cleaning,
+and verifies the remuxed file with Android's extractor and a full FFmpeg read.
+
 ## Build cache
 
 Native compilation and UniFFI generation support Gradle's task-output cache.

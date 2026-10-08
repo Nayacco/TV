@@ -11,8 +11,10 @@ import com.fongmi.android.tv.db.AppDatabase;
 import com.fongmi.android.tv.server.Server;
 import com.fongmi.android.tv.service.CacheDownloadService;
 import com.fongmi.fluxdown.FFmpegProbe;
+import com.fongmi.fluxdown.FFmpegTsNormalizer;
 import com.fongmi.fluxdown.FluxDownEngine;
 import com.fongmi.fluxdown.FluxTaskInfo;
+import com.fongmi.fluxdown.PngTsCleaner;
 import com.google.gson.reflect.TypeToken;
 
 import java.io.File;
@@ -28,6 +30,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
@@ -43,17 +46,32 @@ public final class CacheRepository implements FluxDownEngine.Listener {
     private static final Type HEADERS_TYPE = new TypeToken<Map<String, String>>() {}.getType();
 
     private final ExecutorService serial = Executors.newSingleThreadExecutor();
+    private final ExecutorService mediaExecutor = Executors.newSingleThreadExecutor();
     private final Map<String, FluxTaskInfo> pendingTasks = new HashMap<>();
     private final Map<String, Operation> operations = new HashMap<>();
     private final Set<String> ignoredTaskIds = new HashSet<>();
     private final Set<String> completionChecks = new HashSet<>();
+    private final Map<String, CompletionJob> completionJobs = new HashMap<>();
     private final AtomicLong idleActionVersion = new AtomicLong();
     private PendingCleanup pendingCleanup;
     private long nextOperationId;
 
-    private enum Action { CREATE, RESTART, PAUSE, RESUME, CANCEL, DELETE }
+    private enum Action { CREATE, RESTART, PAUSE, RESUME, CANCEL, DELETE, COMPLETE }
 
     private record Operation(long id, Action action) {
+    }
+
+    private static final class CompletionJob {
+        final String cacheKey;
+        final String taskId;
+        final Operation operation;
+        Future<?> future;
+
+        CompletionJob(String cacheKey, String taskId, Operation operation) {
+            this.cacheKey = cacheKey;
+            this.taskId = taskId;
+            this.operation = operation;
+        }
     }
 
     private record PendingCleanup(long version, Runnable callback) {
@@ -294,6 +312,7 @@ public final class CacheRepository implements FluxDownEngine.Listener {
             completionChecks.remove(taskId);
             if (ignoredTaskIds.remove(taskId)) return;
             CacheMetadata item = dao().findByTaskId(taskId);
+            if (item != null) cancelCompletion(item.getCacheKey());
             if (item != null && !item.isCompleted() && !CacheMetadata.FAILED.equals(item.getStatus())) {
                 dao().markFailed(item.getCacheKey(), "FluxDown task was removed", System.currentTimeMillis());
                 CacheEvent.refresh();
@@ -365,6 +384,9 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         // Failed/canceled/completed rows are terminal until an explicit restart replaces the row and task id.
         if (CacheMetadata.FAILED.equals(item.getStatus()) || item.isCompleted()) return;
         if (isTerminating(item.getCacheKey())) return;
+        Operation current = operations.get(item.getCacheKey());
+        // Native progress must not undo application-side completion validation/remuxing.
+        if (current != null && current.action() == Action.COMPLETE) return;
         pendingTasks.remove(task.getTaskId());
         long now = System.currentTimeMillis();
         if (!TextUtils.isEmpty(task.getFileName()) && !task.getFileName().equals(item.getOutputFileName())) {
@@ -372,14 +394,23 @@ public final class CacheRepository implements FluxDownEngine.Listener {
             item.setOutputFileName(task.getFileName());
         }
         if (task.getStatus() == 3) {
+            if (current != null && (current.action() == Action.CREATE || current.action() == Action.RESTART)) {
+                pendingTasks.put(task.getTaskId(), task);
+                return;
+            }
             if (!completionChecks.add(task.getTaskId())) return;
+            String cacheKey = item.getCacheKey();
+            Operation completion = begin(cacheKey, Action.COMPLETE);
+            dao().updateProgress(cacheKey, CacheMetadata.DOWNLOADING, task.getDownloadedBytes(),
+                    task.getTotalBytes(), 0, now, null);
+            CacheEvent.refresh();
             try {
                 FluxDownEngine.offlineMediaWarning(task.getTaskId(), operation(
-                        warning -> serial.execute(() -> complete(task, warning)),
-                        error -> serial.execute(() -> complete(task,
+                        warning -> serial.execute(() -> complete(cacheKey, completion, task, warning)),
+                        error -> serial.execute(() -> complete(cacheKey, completion, task,
                                 "Unable to verify audio completeness: " + error))));
             } catch (RuntimeException error) {
-                complete(task, "Unable to verify audio completeness: " + completionError(error));
+                complete(cacheKey, completion, task, "Unable to verify audio completeness: " + completionError(error));
             }
             return;
         }
@@ -389,53 +420,143 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         stopIfIdle();
     }
 
-    private void complete(FluxTaskInfo task, String offlineWarning) {
-        completionChecks.remove(task.getTaskId());
-        if (ignoredTaskIds.contains(task.getTaskId())) return;
-        CacheMetadata item = dao().findByTaskId(task.getTaskId());
-        if (item == null || item.isCompleted() || CacheMetadata.FAILED.equals(item.getStatus())
-                || isTerminating(item.getCacheKey())) return;
-        long now = System.currentTimeMillis();
+    private void complete(String cacheKey, Operation operation, FluxTaskInfo task, String offlineWarning) {
+        if (!isCurrent(cacheKey, operation)) return;
+        CacheMetadata item = completionItem(cacheKey, task.getTaskId());
+        if (item == null) {
+            completionChecks.remove(task.getTaskId());
+            end(cacheKey, operation);
+            stopIfIdle();
+            return;
+        }
+        if (completionJobs.containsKey(cacheKey)) return;
+        CompletionJob job = new CompletionJob(cacheKey, task.getTaskId(), operation);
+        completionJobs.put(cacheKey, job);
+        try {
+            job.future = mediaExecutor.submit(() -> prepareCompletion(job, item, task, offlineWarning));
+        } catch (RuntimeException error) {
+            finishCompletion(job, task, null, null, null, completionError(error));
+        }
+    }
+
+    // This worker owns only temporary files. It must never replace the source or mutate Room.
+    private void prepareCompletion(CompletionJob job, CacheMetadata item, FluxTaskInfo task, String offlineWarning) {
         File candidate = null;
+        FFmpegTsNormalizer.Prepared prepared = null;
+        String streamMimeType = null;
+        String error = null;
         try {
             if (task.getFileName() != null) candidate = new File(task.getSaveDir(), task.getFileName());
             if (task.getFileMissing()) throw new IllegalStateException("FluxDown reports the completed file missing");
-            File file = CachePaths.requireReadableFile(candidate);
-            String streamMimeType = CacheFileValidator.streamingMimeType(file);
-            if (streamMimeType != null) {
+            candidate = CachePaths.requireReadableFile(candidate);
+            streamMimeType = CacheFileValidator.streamingMimeType(candidate);
+            if (streamMimeType == null) {
+                CacheFileValidator.requireOfflineMedia(candidate);
+                if (!TextUtils.isEmpty(offlineWarning)) {
+                    throw new IllegalStateException("Offline cache is incomplete: " + offlineWarning);
+                }
+                if (PngTsCleaner.hasPngPrefix(candidate)) {
+                    prepared = FFmpegTsNormalizer.prepare(
+                            new File(App.get().getApplicationInfo().nativeLibraryDir, "libffmpeg.so"), candidate,
+                            output -> {
+                                CacheFileValidator.requireOfflineMedia(output);
+                                CacheTrackValidator.requireCompleteTracks(output, item.getOriginalUrl(), item.getMimeType());
+                            });
+                } else {
+                    CacheTrackValidator.requireCompleteTracks(candidate, item.getOriginalUrl(), item.getMimeType());
+                }
+            }
+        } catch (Exception failure) {
+            // Cancellation must not launch a second diagnostic process while stopping FFmpeg.
+            error = Thread.currentThread().isInterrupted() ? completionError(failure)
+                    : completionDiagnostics(failure, candidate, item, offlineWarning);
+        }
+        File resultFile = candidate;
+        FFmpegTsNormalizer.Prepared resultPrepared = prepared;
+        String resultMime = streamMimeType;
+        String resultError = error;
+        serial.execute(() -> finishCompletion(job, task, resultFile, resultPrepared, resultMime, resultError));
+    }
+
+    private CacheMetadata completionItem(String cacheKey, String taskId) {
+        if (ignoredTaskIds.contains(taskId)) return null;
+        CacheMetadata item = dao().find(cacheKey);
+        if (item == null || !taskId.equals(item.getFluxdownTaskId()) || item.isCompleted()
+                || CacheMetadata.FAILED.equals(item.getStatus())) return null;
+        return item;
+    }
+
+    private void finishCompletion(CompletionJob job, FluxTaskInfo task, File candidate,
+                                  FFmpegTsNormalizer.Prepared prepared, String streamMimeType, String error) {
+        try {
+            if (!isCurrent(job.cacheKey, job.operation) || completionJobs.get(job.cacheKey) != job) return;
+            CacheMetadata item = completionItem(job.cacheKey, job.taskId);
+            if (item == null) return;
+            long now = System.currentTimeMillis();
+            if (error != null) {
+                dao().markFailed(job.cacheKey, error, now);
+            } else if (streamMimeType != null) {
                 String previousUrl = CacheMediaUrl.onLocalServer(item.getOriginalUrl(), Server.get().getAddress(true));
                 boolean retryWithDetectedType = !CacheMediaUrl.forDownload(previousUrl, item.getMimeType())
                         .equals(CacheMediaUrl.forDownload(previousUrl, streamMimeType));
-                dao().markIncomplete(item.getCacheKey(), streamMimeType,
+                dao().markIncomplete(job.cacheKey, streamMimeType,
                         CacheFileValidator.INCOMPLETE_MESSAGE, now);
                 if (retryWithDetectedType) {
-                    CacheMetadata retry = dao().find(item.getCacheKey());
+                    CacheMetadata retry = dao().find(job.cacheKey);
                     if (retry != null) {
+                        endCompletion(job);
                         restart(retry, request(retry), null);
-                        return;
                     }
                 }
-                CacheEvent.refresh();
-                stopIfIdle();
-                return;
+            } else {
+                // Cancellation/deletion and this commit share the serial executor. Recheck above
+                // before installing the independently validated file at the original path.
+                if (prepared != null) prepared.commit();
+                File file = CachePaths.requireReadableFile(candidate);
+                long size = file.length();
+                long total = prepared != null || task.getTotalBytes() <= 0 ? size : task.getTotalBytes();
+                dao().markCompleted(job.cacheKey, file.getAbsolutePath(), mime(file, item.getMimeType()),
+                        size, total,
+                        task.getCompletedAt() > 0 ? task.getCompletedAt() * 1000 : now);
             }
-            CacheFileValidator.requireOfflineMedia(file);
-            CacheTrackValidator.requireCompleteTracks(file, item.getOriginalUrl(), item.getMimeType());
-            if (!TextUtils.isEmpty(offlineWarning)) {
-                throw new IllegalStateException("Offline cache is incomplete: " + offlineWarning);
+        } catch (Exception failure) {
+            if (isCurrent(job.cacheKey, job.operation) && completionItem(job.cacheKey, job.taskId) != null) {
+                dao().markFailed(job.cacheKey, completionError(failure), System.currentTimeMillis());
             }
-            long size = file.length();
-            dao().markCompleted(item.getCacheKey(), file.getAbsolutePath(), mime(file, item.getMimeType()),
-                    size, task.getTotalBytes() > 0 ? task.getTotalBytes() : size,
-                    task.getCompletedAt() > 0 ? task.getCompletedAt() * 1000 : now);
-        } catch (Exception e) {
-            dao().markFailed(item.getCacheKey(), completionDiagnostics(e, candidate, item, offlineWarning), now);
+        } finally {
+            if (prepared != null) {
+                try {
+                    prepared.close();
+                } catch (Exception cleanupError) {
+                    android.util.Log.w("CacheRepository", "Unable to remove normalization temporary", cleanupError);
+                }
+            }
+            endCompletion(job);
+            CacheEvent.refresh();
+            stopIfIdle();
         }
-        CacheEvent.refresh();
-        stopIfIdle();
+    }
+
+    private void endCompletion(CompletionJob job) {
+        if (completionJobs.get(job.cacheKey) == job) completionJobs.remove(job.cacheKey);
+        if (isCurrent(job.cacheKey, job.operation)) {
+            completionChecks.remove(job.taskId);
+            end(job.cacheKey, job.operation);
+        }
+    }
+
+    private void cancelCompletion(String cacheKey) {
+        CompletionJob job = completionJobs.remove(cacheKey);
+        if (job != null && job.future != null) job.future.cancel(true);
+        Operation current = operations.get(cacheKey);
+        if (current == null || current.action() != Action.COMPLETE) return;
+        CacheMetadata item = dao().find(cacheKey);
+        if (item != null) completionChecks.remove(item.getFluxdownTaskId());
+        end(cacheKey, current);
     }
 
     private Operation begin(String cacheKey, Action action) {
+        cancelCompletion(cacheKey);
         Operation operation = new Operation(++nextOperationId, action);
         operations.put(cacheKey, operation);
         return operation;
@@ -595,6 +716,7 @@ public final class CacheRepository implements FluxDownEngine.Listener {
     private void markActiveFailed(String message) {
         long now = System.currentTimeMillis();
         String error = TextUtils.isEmpty(message) ? "FluxDown engine failed" : message;
+        for (String cacheKey : new ArrayList<>(completionJobs.keySet())) cancelCompletion(cacheKey);
         // DELETE/CANCEL own user-visible cleanup and must finish even when FluxDown dies;
         // otherwise a late command callback would be invalidated and local data could remain.
         for (Map.Entry<String, Operation> entry : new ArrayList<>(operations.entrySet())) {
@@ -641,7 +763,8 @@ public final class CacheRepository implements FluxDownEngine.Listener {
 
     private boolean hasForegroundOperation() {
         for (Operation operation : operations.values()) {
-            if (operation.action() == Action.CREATE || operation.action() == Action.RESTART || operation.action() == Action.RESUME) {
+            if (operation.action() == Action.CREATE || operation.action() == Action.RESTART
+                    || operation.action() == Action.RESUME || operation.action() == Action.COMPLETE) {
                 return true;
             }
         }
