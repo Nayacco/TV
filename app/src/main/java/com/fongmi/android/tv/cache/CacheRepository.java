@@ -1,13 +1,16 @@
 package com.fongmi.android.tv.cache;
 
+import android.os.Build;
 import android.text.TextUtils;
 
 import com.fongmi.android.tv.App;
+import com.fongmi.android.tv.BuildConfig;
 import com.fongmi.android.tv.api.config.VodConfig;
 import com.fongmi.android.tv.bean.Site;
 import com.fongmi.android.tv.db.AppDatabase;
 import com.fongmi.android.tv.server.Server;
 import com.fongmi.android.tv.service.CacheDownloadService;
+import com.fongmi.fluxdown.FFmpegProbe;
 import com.fongmi.fluxdown.FluxDownEngine;
 import com.fongmi.fluxdown.FluxTaskInfo;
 import com.google.gson.reflect.TypeToken;
@@ -291,7 +294,7 @@ public final class CacheRepository implements FluxDownEngine.Listener {
             completionChecks.remove(taskId);
             if (ignoredTaskIds.remove(taskId)) return;
             CacheMetadata item = dao().findByTaskId(taskId);
-            if (item != null && !item.isCompleted()) {
+            if (item != null && !item.isCompleted() && !CacheMetadata.FAILED.equals(item.getStatus())) {
                 dao().markFailed(item.getCacheKey(), "FluxDown task was removed", System.currentTimeMillis());
                 CacheEvent.refresh();
                 stopIfIdle();
@@ -393,9 +396,11 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         if (item == null || item.isCompleted() || CacheMetadata.FAILED.equals(item.getStatus())
                 || isTerminating(item.getCacheKey())) return;
         long now = System.currentTimeMillis();
+        File candidate = null;
         try {
+            if (task.getFileName() != null) candidate = new File(task.getSaveDir(), task.getFileName());
             if (task.getFileMissing()) throw new IllegalStateException("FluxDown reports the completed file missing");
-            File file = CachePaths.requireReadableFile(new File(task.getSaveDir(), task.getFileName()));
+            File file = CachePaths.requireReadableFile(candidate);
             String streamMimeType = CacheFileValidator.streamingMimeType(file);
             if (streamMimeType != null) {
                 String previousUrl = CacheMediaUrl.onLocalServer(item.getOriginalUrl(), Server.get().getAddress(true));
@@ -424,7 +429,7 @@ public final class CacheRepository implements FluxDownEngine.Listener {
                     size, task.getTotalBytes() > 0 ? task.getTotalBytes() : size,
                     task.getCompletedAt() > 0 ? task.getCompletedAt() * 1000 : now);
         } catch (Exception e) {
-            dao().markFailed(item.getCacheKey(), completionError(e), now);
+            dao().markFailed(item.getCacheKey(), completionDiagnostics(e, candidate, item, offlineWarning), now);
         }
         CacheEvent.refresh();
         stopIfIdle();
@@ -814,6 +819,30 @@ public final class CacheRepository implements FluxDownEngine.Listener {
     private static String completionError(Exception error) {
         String message = error == null ? null : error.getMessage();
         return TextUtils.isEmpty(message) ? "Cached file is missing, unreadable, or incomplete" : message;
+    }
+
+    private static String completionDiagnostics(Exception error, File candidate, CacheMetadata item, String warning) {
+        try {
+            File owned = null;
+            if (candidate != null) {
+                try {
+                    owned = CachePaths.requireOwned(candidate);
+                } catch (Exception ignored) {
+                    // Display the attempted path, but never read or probe a file outside our cache.
+                }
+            }
+            String device = Build.MANUFACTURER + " " + Build.MODEL + " / Android " + Build.VERSION.RELEASE
+                    + " / API " + Build.VERSION.SDK_INT + " / app " + BuildConfig.VERSION_NAME
+                    + " " + BuildConfig.FLAVOR + " " + BuildConfig.BUILD_TYPE;
+            return CacheCompletionDiagnostics.describe(error, owned,
+                    candidate == null ? null : candidate.getAbsolutePath(), item.getOriginalUrl(), item.getMimeType(),
+                    warning, device, file -> FFmpegProbe.inspect(
+                            new File(App.get().getApplicationInfo().nativeLibraryDir, "libffmpeg.so"), file));
+        } catch (RuntimeException diagnosticError) {
+            // Diagnostic collection must never hide the actual completion failure.
+            return completionError(error) + "\n" + CacheCompletionDiagnostics.TAG
+                    + "\nDiagnostics unavailable: " + diagnosticError;
+        }
     }
 
     private static FluxDownEngine.Callback operation(Consumer<String> success, Consumer<String> error) {

@@ -9,6 +9,7 @@ import android.util.Log;
 import android.widget.TextView;
 
 import com.fongmi.fluxdown.FFmpegRuntime;
+import com.fongmi.fluxdown.FFmpegProbe;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -95,6 +96,7 @@ public final class SmokeActivity extends Activity {
         requireMp4(combined);
         requireAndroidTracks(combined);
         summary.append("Independent MPEG4 video + AAC audio -> one MP4, readable tracks/samples: OK\n");
+        requireReadOnlyProbe(ffmpeg, combined);
 
         File ts = new File(work, "input.ts");
         File remuxed = new File(work, "remuxed.mp4");
@@ -114,6 +116,51 @@ public final class SmokeActivity extends Activity {
         run(ffmpeg, "-v", "error", "-i", remuxed.getAbsolutePath(), "-map", "0:v:0", "-map", "0:a:0",
                 "-c", "copy", "-f", "null", "-");
         summary.append("MPEG2 video + AAC in TS -> actual MP4 via stream copy, both tracks: OK\n");
+        String tsProbe = FFmpegProbe.inspect(ffmpeg, ts);
+        require(tsProbe.contains("Input #0, mpegts") && tsProbe.contains("Video:") && tsProbe.contains("Audio:"),
+                "Production metadata probe did not identify TS streams: " + tsProbe);
+        summary.append("Production read-only metadata probe identifies actual TS container/streams: OK\n");
+    }
+
+    private void requireReadOnlyProbe(File ffmpeg, File combined) throws IOException {
+        byte[] before = fileDigest(combined);
+        int filesBefore = work.list().length;
+        String probe = FFmpegProbe.inspect(ffmpeg, combined);
+        require(probe.startsWith("FFmpeg probe: exited 1"), "Input-only probe exit must be reported neutrally: " + probe);
+        require(probe.contains("Input #0, mov,mp4") && probe.contains("Video:") && probe.contains("Audio:"),
+                "Production probe did not report MP4's container and both streams: " + probe);
+        require(probe.contains("Exit 1 is expected"), "A readable input-only probe must not be labelled a failure");
+        require(Arrays.equals(before, fileDigest(combined)), "Metadata probe changed cached media");
+        require(work.list().length == filesBefore, "Metadata probe created an output file");
+
+        File malformed = new File(work, "malformed.mp4");
+        try (FileOutputStream output = new FileOutputStream(malformed)) {
+            output.write("<html>not video</html>".getBytes(StandardCharsets.UTF_8));
+        }
+        byte[] malformedBefore = fileDigest(malformed);
+        filesBefore = work.list().length;
+        String rejected = FFmpegProbe.inspect(ffmpeg, malformed);
+        require(rejected.startsWith("FFmpeg probe: exited 1") && rejected.contains("FFmpeg output:"),
+                "Malformed media probe did not capture FFmpeg's diagnostic output: " + rejected);
+        require(rejected.contains("Invalid data found") || rejected.contains("moov atom not found"),
+                "Malformed media probe lacks its input error: " + rejected);
+        require(Arrays.equals(malformedBefore, fileDigest(malformed)), "Probe modified malformed input");
+        require(work.list().length == filesBefore, "Malformed media probe created an output file");
+        summary.append("Production read-only probe: MP4 streams, neutral exit 1, malformed-file diagnostics, unchanged inputs/no outputs: OK\n");
+    }
+
+    private static byte[] fileDigest(File file) throws IOException {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            try (FileInputStream input = new FileInputStream(file)) {
+                byte[] buffer = new byte[4096];
+                int count;
+                while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
+            }
+            return digest.digest();
+        } catch (java.security.NoSuchAlgorithmException error) {
+            throw new IOException("SHA-256 unavailable", error);
+        }
     }
 
     private void requireUnmanagedPathPreserved(String nativeDir) throws IOException {

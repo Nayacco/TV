@@ -10,6 +10,7 @@ if (!ffmpegDir.isPresent()) {
 def runtimeDir = layout.buildDirectory.dir('generated/runtime')
 def copyRuntime = tasks.register('copyFFmpegRuntime', Sync) {
     from '../../rust/fluxdown-android/src/main/java/com/fongmi/fluxdown/FFmpegRuntime.java'
+    from '../../rust/fluxdown-android/src/main/java/com/fongmi/fluxdown/FFmpegProbe.java'
     into runtimeDir.map { it.dir('com/fongmi/fluxdown') }
 }
 
