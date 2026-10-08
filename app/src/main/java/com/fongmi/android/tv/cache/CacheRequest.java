@@ -25,7 +25,7 @@ public record CacheRequest(String cacheKey, String title, String poster, String 
         String title = TextUtils.isEmpty(history.getVodName()) ? displayTitle : history.getVodName();
         if (TextUtils.isEmpty(title)) title = "video";
         String fileTitle = title + (TextUtils.isEmpty(history.getVodRemarks()) ? "" : "-" + history.getVodRemarks());
-        mediaUrl = CacheMediaUrl.withSiteKey(mediaUrl, siteKey(history));
+        mediaUrl = CacheMediaUrl.withProxySite(mediaUrl, siteKey(history));
         return new CacheRequest(
                 cacheKey,
                 title,

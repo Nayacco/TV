@@ -156,6 +156,15 @@ public class JarLoader {
         return tryOthers(params);
     }
 
+    public Object[] proxy(Map<String, String> params, String jar) throws Exception {
+        if (jar == null || jar.isEmpty()) throw new IllegalStateException("Proxy source has no JAR");
+        String key = Crypto.md5(jar);
+        parseJar(key, jar);
+        Method method = methods.get(key);
+        if (method == null) throw new IllegalStateException("Proxy source JAR has no proxy handler");
+        return (Object[]) method.invoke(null, params);
+    }
+
     private Object[] tryOthers(Map<String, String> p) {
         return methods.entrySet().stream().filter(e -> !e.getKey().equals(recent)).map(e -> proxyInvoke(e.getValue(), p)).filter(Objects::nonNull).findFirst().orElse(null);
     }

@@ -44,20 +44,36 @@ public class CacheMediaUrlTest {
     }
 
     @Test
-    public void addsEncodedSiteKeyToLocalProxyOnce() {
+    public void addsEncodedCacheBindingWithoutChangingUpstreamRouting() {
         String source = "http://127.0.0.1:9978/proxy?do=js&id=42#part";
-        String expected = "http://127.0.0.1:9978/proxy?do=js&id=42&siteKey=%E7%AB%99%E7%82%B9%20A#part";
-        assertEquals(expected, CacheMediaUrl.withSiteKey(source, "站点 A"));
-        assertEquals(expected, CacheMediaUrl.withSiteKey(expected, "other"));
+        String expected = "http://127.0.0.1:9978/proxy?do=js&id=42&_cacheSiteKey=%E7%AB%99%E7%82%B9%20A#part";
+        assertEquals(expected, CacheMediaUrl.withProxySite(source, "站点 A"));
+        assertEquals(expected, CacheMediaUrl.withProxySite(expected, "other"));
+        assertTrue(CacheMediaUrl.hasProxyContext(expected));
+    }
+
+    @Test
+    public void preservesNativeSiteKeyAndRecognizesItAsBound() {
+        String source = "http://127.0.0.1:9978/proxy?do=m3u8&siteKey=native&url=movie.m3u8";
+        assertEquals(source, CacheMediaUrl.withProxySite(source, "other"));
+        assertTrue(CacheMediaUrl.hasProxyContext(source));
+        assertFalse(CacheMediaUrl.hasProxyContext("http://127.0.0.1:9978/proxy?do=m3u8"));
+    }
+
+    @Test
+    public void reportedM3u8ProxyKeepsItsEncodedUrlWithIndependentBinding() {
+        String source = "http://127.0.0.1:9978/proxy?do=m3u8&url=https%3A%2F%2Fvip1.lz-cdn5.com%2F20220424%2F11560_e505c220%2Findex.m3u8";
+        assertEquals(source.replace("/proxy?", "/proxy.m3u8?") + "&_cacheSiteKey=%E7%B3%AF%E7%B1%B3",
+                CacheMediaUrl.forDownload(CacheMediaUrl.withProxySite(source, "糯米"), "application/x-mpegURL"));
     }
 
     @Test
     public void recognizesLanProxyAndRoutesItToCurrentLoopbackServer() {
         String source = "http://192.168.50.12:9978/proxy?do=js&id=42#part";
-        String keyed = CacheMediaUrl.withSiteKey(source, "lan");
+        String keyed = CacheMediaUrl.withProxySite(source, "lan");
         String local = CacheMediaUrl.onLocalServer(keyed, "http://127.0.0.1:9981");
-        assertEquals("http://127.0.0.1:9981/proxy?do=js&id=42&siteKey=lan#part", local);
-        assertEquals("http://127.0.0.1:9981/proxy.m3u8?do=js&id=42&siteKey=lan#part",
+        assertEquals("http://127.0.0.1:9981/proxy?do=js&id=42&_cacheSiteKey=lan#part", local);
+        assertEquals("http://127.0.0.1:9981/proxy.m3u8?do=js&id=42&_cacheSiteKey=lan#part",
                 CacheMediaUrl.forDownload(local, "application/x-mpegURL"));
     }
 

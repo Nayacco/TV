@@ -77,10 +77,28 @@ public class BaseLoader {
     }
 
     public Object[] proxy(Map<String, String> params) throws Exception {
-        if (params.containsKey("siteKey")) return getSpider(params.get("siteKey")).proxy(params);
-        if ("js".equals(params.get("do"))) return jsLoader.proxy(params);
-        if ("py".equals(params.get("do"))) return pyLoader.proxy(params);
-        return jarLoader.proxy(params);
+        return ProxyDispatcher.dispatch(params, new ProxyDispatcher.Backend() {
+            @Override
+            public Object[] site(String key, Map<String, String> params) throws Exception {
+                return getSpider(key).proxy(params);
+            }
+
+            @Override
+            public Object[] jar(String key, Map<String, String> params) throws Exception {
+                Site site = VodConfig.get().getSite(key);
+                Live live = LiveConfig.get().getLive(key);
+                if (!site.isEmpty()) return jarLoader.proxy(params, site.getJar());
+                if (!live.isEmpty()) return jarLoader.proxy(params, live.getJar());
+                throw new IllegalStateException("Proxy source is no longer available: " + key);
+            }
+
+            @Override
+            public Object[] recent(Map<String, String> params) throws Exception {
+                if ("js".equals(params.get("do"))) return jsLoader.proxy(params);
+                if ("py".equals(params.get("do"))) return pyLoader.proxy(params);
+                return jarLoader.proxy(params);
+            }
+        });
     }
 
     public void parseJar(String jar, boolean recent) {

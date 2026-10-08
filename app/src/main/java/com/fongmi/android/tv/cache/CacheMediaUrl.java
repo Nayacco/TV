@@ -1,5 +1,7 @@
 package com.fongmi.android.tv.cache;
 
+import com.fongmi.android.tv.api.loader.ProxyDispatcher;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
@@ -77,27 +79,28 @@ public final class CacheMediaUrl {
         return url != null && url.equals(onLocalServer(url, serverBaseUrl));
     }
 
-    public static String withSiteKey(String url, String siteKey) {
-        if (url == null || siteKey == null || siteKey.isEmpty() || !isLocalProxy(url) || hasSiteKey(url)) return url;
+    public static String withProxySite(String url, String siteKey) {
+        if (url == null || siteKey == null || siteKey.isEmpty() || !isLocalProxy(url) || hasProxyContext(url)) return url;
         try {
             URI uri = new URI(url);
             int fragmentStart = url.indexOf('#');
             int insertAt = fragmentStart < 0 ? url.length() : fragmentStart;
             String beforeFragment = url.substring(0, insertAt);
             String separator = uri.getRawQuery() == null ? "?" : uri.getRawQuery().isEmpty() ? "" : "&";
-            return beforeFragment + separator + "siteKey=" + encodeQueryValue(siteKey) + url.substring(insertAt);
+            return beforeFragment + separator + ProxyDispatcher.CACHE_SITE_KEY + "=" + encodeQueryValue(siteKey) + url.substring(insertAt);
         } catch (Exception ignored) {
             return url;
         }
     }
 
-    public static boolean hasSiteKey(String url) {
+    public static boolean hasProxyContext(String url) {
         try {
             String query = new URI(url).getRawQuery();
             if (query == null) return false;
             for (String part : query.split("&")) {
                 int equals = part.indexOf('=');
-                if ((equals < 0 ? part : part.substring(0, equals)).equals("siteKey")) return true;
+                String name = equals < 0 ? part : part.substring(0, equals);
+                if (name.equals("siteKey") || name.equals(ProxyDispatcher.CACHE_SITE_KEY)) return true;
             }
         } catch (Exception ignored) {
         }

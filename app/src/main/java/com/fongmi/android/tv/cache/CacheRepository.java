@@ -180,16 +180,20 @@ public final class CacheRepository implements FluxDownEngine.Listener {
             if (current != null && current.action() != Action.PAUSE && current.action() != Action.RESUME) return;
             CacheMetadata item = dao().find(cacheKey);
             if (item == null || item.isCompleted()) return;
-            boolean legacyProxy = CacheMediaUrl.isLocalProxy(item.getOriginalUrl()) && !CacheMediaUrl.hasSiteKey(item.getOriginalUrl());
-            boolean movedProxy = false;
-            if (CacheMediaUrl.isLocalProxy(item.getOriginalUrl())) {
-                prepareProxySource(item.getOriginalUrl());
-                movedProxy = proxyEndpointChanged(item, Server.get().getAddress(true));
-            }
-            if (CacheMetadata.FAILED.equals(item.getStatus()) || TextUtils.isEmpty(item.getFluxdownTaskId()) || legacyProxy || movedProxy) {
-                restart(item, request(item), null);
-            } else {
-                control(cacheKey, false);
+            try {
+                boolean legacyProxy = CacheMediaUrl.isLocalProxy(item.getOriginalUrl()) && !CacheMediaUrl.hasProxyContext(item.getOriginalUrl());
+                boolean movedProxy = false;
+                if (CacheMediaUrl.isLocalProxy(item.getOriginalUrl())) {
+                    prepareProxySource(item.getOriginalUrl());
+                    movedProxy = proxyEndpointChanged(item, Server.get().getAddress(true));
+                }
+                if (CacheMetadata.FAILED.equals(item.getStatus()) || TextUtils.isEmpty(item.getFluxdownTaskId()) || legacyProxy || movedProxy) {
+                    restart(item, request(item), null);
+                } else {
+                    control(cacheKey, false);
+                }
+            } catch (RuntimeException e) {
+                markFailedIfIncomplete(cacheKey, e.getMessage());
             }
         });
     }
@@ -663,23 +667,29 @@ public final class CacheRepository implements FluxDownEngine.Listener {
 
     private static String recoverProxyUrl(CacheMetadata item) {
         String url = item.getOriginalUrl();
-        if (!CacheMediaUrl.isLocalProxy(url) || CacheMediaUrl.hasSiteKey(url)) return url;
+        if (!CacheMediaUrl.isLocalProxy(url) || CacheMediaUrl.hasProxyContext(url)) return url;
         VodConfig.get().ensureLoaded();
         Site site = findSite(item.getSourceName());
-        return site == null ? url : CacheMediaUrl.withSiteKey(url, site.getKey());
+        if (site == null) throw new IllegalStateException("Cache source is unavailable; cache the video again from the playback page");
+        return CacheMediaUrl.withProxySite(url, site.getKey());
     }
 
     private static Site findSite(String sourceName) {
         if (TextUtils.isEmpty(sourceName)) return null;
+        for (Site site : VodConfig.get().getSites()) if (sourceName.equals(site.getKey())) return site;
+        Site match = null;
         for (Site site : VodConfig.get().getSites()) {
-            if (sourceName.equals(site.getKey()) || sourceName.equals(site.getName())) return site;
+            if (!sourceName.equals(site.getName())) continue;
+            if (match != null) return null;
+            match = site;
         }
-        return null;
+        return match;
     }
 
     private static boolean proxyEndpointChanged(CacheMetadata item, String serverBaseUrl) {
         return CacheMediaUrl.isLocalProxy(item.getOriginalUrl())
-                && !CacheMediaUrl.isOnLocalServer(item.getOriginalUrl(), serverBaseUrl);
+                && (!CacheMediaUrl.hasProxyContext(item.getOriginalUrl())
+                || !CacheMediaUrl.isOnLocalServer(item.getOriginalUrl(), serverBaseUrl));
     }
 
     private static CacheRequest withRecoveredMimeType(CacheMetadata previous, CacheRequest request) {
@@ -701,10 +711,6 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         for (CacheMetadata item : items) {
             if (!CacheMediaUrl.isLocalProxy(item.getOriginalUrl())) continue;
             prepareProxySource(item.getOriginalUrl());
-            if (!CacheMediaUrl.hasSiteKey(item.getOriginalUrl())) {
-                Site site = findSite(item.getSourceName());
-                if (site != null) site.recent().spider();
-            }
         }
     }
 
