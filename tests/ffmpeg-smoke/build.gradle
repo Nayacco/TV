@@ -2,6 +2,10 @@ plugins {
     id 'com.android.application' version '9.3.1'
 }
 
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+
 def ffmpegDir = providers.gradleProperty('fluxdown.ffmpegDir')
 if (!ffmpegDir.isPresent()) {
     throw new GradleException('Pass -Pfluxdown.ffmpegDir=<Android FFmpeg jniLibs directory>')

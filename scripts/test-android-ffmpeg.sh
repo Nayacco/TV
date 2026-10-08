@@ -33,7 +33,7 @@ trap fail_with_diagnostics ERR
 bash "${repo_dir}/gradlew" --no-daemon --console=plain --build-cache \
   -p "${project_dir}" \
   "-Pfluxdown.ffmpegDir=${native_dir}" \
-  assembleDebug 2>&1 | tee "${log_dir}/gradle.log"
+  testDebugUnitTest assembleDebug 2>&1 | tee "${log_dir}/gradle.log"
 
 shopt -s nullglob
 apks=("${project_dir}"/build/outputs/apk/debug/*.apk)

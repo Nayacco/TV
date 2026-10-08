@@ -66,8 +66,7 @@ public final class SmokeActivity extends Activity {
     }
 
     private void verify() throws Exception {
-        work = new File(getFilesDir(), "fixtures");
-        require(work.isDirectory() || work.mkdirs(), "Cannot create fixture directory");
+        work = fixtureDirectory(getFilesDir());
         String nativeDir = getApplicationInfo().nativeLibraryDir;
         File ffmpeg = FFmpegRuntime.prepare(new File(getFilesDir(), "fluxdown").getAbsolutePath(), nativeDir);
         require(ffmpeg.getCanonicalPath().equals(new File(nativeDir, "libffmpeg.so").getCanonicalPath()),
@@ -123,6 +122,13 @@ public final class SmokeActivity extends Activity {
                 "Production metadata probe did not identify TS streams: " + tsProbe);
         summary.append("Production read-only metadata probe identifies actual TS container/streams: OK\n");
         requirePngWrappedTs(ffmpeg, ts);
+    }
+
+    static File fixtureDirectory(File filesDir) throws IOException {
+        // Match CachePaths' canonical input boundary, including Android's app-data directory aliases.
+        File directory = new File(filesDir, "fixtures").getCanonicalFile();
+        require(directory.isDirectory() || directory.mkdirs(), "Cannot create fixture directory");
+        return directory;
     }
 
     private void requirePngWrappedTs(File ffmpeg, File ts) throws Exception {
