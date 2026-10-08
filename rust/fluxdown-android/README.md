@@ -68,6 +68,19 @@ native task implementation or toolchain needs to populate that cache. Subsequent
 runs report native `FROM-CACHE`/rebuild counts, per-task timing and a sanitized
 Gradle log in the job summary and `gradle-build-reports` artifact.
 
+Cargo's fallback dependency cache has a separate, versioned Release namespace
+which includes the NDK and cargo-ndk versions. It is saved only after a successful
+build, so a failed Debug-only run cannot seed an immutable Release cache. It does
+not replace Gradle's final native-output cache or skip Rust input verification.
+The first successful run with a new namespace must populate it; compare the next
+run to measure reuse. `--info` records native task cache keys and caching decisions
+in the sanitized log when final-output restoration misses.
+
+On the hosted APK runner only, Gradle uses a 4 GiB daemon heap and at most two
+workers to avoid native-debug-metadata merging exhausting the default 2 GiB
+heap. Local JVM settings, Release shrinking, both APK flavors and unit tests are
+unchanged. Actual build success and warm-cache speed still require CI validation.
+
 From the repository root on Windows, verify the actual task classes without an
 Android SDK or Rust compiler:
 

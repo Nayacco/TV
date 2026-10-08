@@ -24,6 +24,7 @@ jobs:
       fluxdown_sha: ${{ steps.collect.outputs.fluxdown_sha }}
     env:
       NDK_VERSION: "28.2.13676358"
+      CARGO_NDK_VERSION: "4.1.2"
 
     steps:
       - name: Check out source and FluxDown
@@ -61,9 +62,9 @@ jobs:
           cache: pip
           cache-dependency-path: chaquo/requirements.txt
 
-      - name: Test safe Gradle cache reporting
+      - name: Test build workflow contracts and safe Gradle cache reporting
         shell: bash
-        run: python -m unittest discover -s tests/ci -p test_gradle_build_report.py -v
+        run: python -m unittest discover -s tests/ci -p 'test_*.py' -v
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -128,17 +129,20 @@ jobs:
           test -s build/ffmpeg/distribution/FFmpeg-NOTICE.txt
           cmp scripts/build-android-ffmpeg.sh build/ffmpeg/distribution/build-android-ffmpeg.sh
 
-      - name: Cache Rust build
+      - name: Cache Rust release dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/fluxdown -> target
-          cache-on-failure: true
-          key: fluxdown-android
+          # The old immutable key was seeded by a Debug-only failed build.
+          # Populate a new Release namespace and never freeze a partial seed.
+          cache-on-failure: false
+          cache-workspace-crates: false
+          key: fluxdown-android-release-v2-ndk-${{ env.NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}
 
       - name: Install cargo-ndk
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-ndk@4.1.2
+          tool: cargo-ndk@${{ env.CARGO_NDK_VERSION }}
 
       - name: Configure optimized release signing
         id: signing
@@ -226,7 +230,11 @@ jobs:
           gradle_log="${RUNNER_TEMP}/gradle.log"
           build_started="${SECONDS}"
 
-          ./gradlew --no-daemon --console=plain --build-cache --profile \
+          # Native metadata merging shares the Gradle daemon heap; 2 GiB ran out.
+          # Keep this runner budget local to CI, without weakening R8 or tests.
+          ./gradlew --no-daemon --console=plain --build-cache --profile --info \
+            --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx4g -Dfile.encoding=UTF-8 --add-exports jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED" \
             -Pfluxdown.ffmpegDir="${GITHUB_WORKSPACE}/build/ffmpeg/jniLibs" \
             :app:testLeanbackDebugUnitTest \
             :app:assembleLeanbackRelease \

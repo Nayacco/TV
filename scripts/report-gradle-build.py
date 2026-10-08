@@ -16,6 +16,12 @@ TASK_LINE = re.compile(
     re.MULTILINE,
 )
 SIGNING_KEYS = {"storePassword", "keyPassword", "keyAlias", "storeFile"}
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text):
+    """Remove ANSI CSI sequences before parsing or matching signing values."""
+    return ANSI_ESCAPE.sub("", text)
 
 
 def decode_property(value):
@@ -41,6 +47,7 @@ def signing_values(properties):
 
 
 def sanitize(text, values):
+    text = strip_ansi(text)
     for value in values:
         text = text.replace(value, "[REDACTED]")
     return re.sub(
@@ -82,7 +89,7 @@ class ProfileRows(HTMLParser):
 def native_outcomes(log):
     return {
         path: outcome or "REBUILT"
-        for path, outcome in TASK_LINE.findall(log)
+        for path, outcome in TASK_LINE.findall(strip_ansi(log))
         if NATIVE_TASK.match(path)
     }
 

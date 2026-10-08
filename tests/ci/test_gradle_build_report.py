@@ -30,6 +30,20 @@ class GradleBuildReportTest(unittest.TestCase):
             ":fluxdown-android:fluxCargoNdkDebug": "FAILED",
         })
 
+    def test_native_outcomes_strip_ansi_before_parsing_task_states(self):
+        log = (
+            "\x1b[1m> Task :fluxdown-android:fluxCargoNdkBindings\x1b[0m "
+            "\x1b[32mFROM-CACHE\x1b[0m\n"
+            "> Task :fluxdown-android:fluxUniffiBindgenRelease "
+            "\x1b[33mUP-TO-DATE\x1b[0m\n"
+            "\x1b[1m> Task :fluxdown-android:fluxCargoNdkRelease\x1b[0m\n"
+        )
+        self.assertEqual(REPORT.native_outcomes(log), {
+            ":fluxdown-android:fluxCargoNdkBindings": "FROM-CACHE",
+            ":fluxdown-android:fluxUniffiBindgenRelease": "UP-TO-DATE",
+            ":fluxdown-android:fluxCargoNdkRelease": "REBUILT",
+        })
+
     def test_profile_parser_handles_nested_cells_and_ignores_project_rows(self):
         parser = REPORT.ProfileRows()
         parser.feed("""<table><tr><th>Task</th><th>Duration</th></tr>
@@ -48,6 +62,20 @@ class GradleBuildReportTest(unittest.TestCase):
             sensitive = REPORT.signing_values(properties)
             self.assertEqual(
                 REPORT.sanitize("<p>secret&amp;&lt;&gt;&quot;</p>", sensitive),
+                "<p>[REDACTED]</p>",
+            )
+
+    def test_sanitizer_redacts_ansi_split_plain_and_html_info_values(self):
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parent.parent) as directory:
+            properties = Path(directory) / "local.properties"
+            properties.write_text('storePassword=secret&<>"\n', encoding="ISO-8859-1")
+            sensitive = REPORT.signing_values(properties)
+            self.assertEqual(
+                REPORT.sanitize('Command: --ks-pass pass:sec\x1b[0mret&<>"', sensitive),
+                "Command: --ks-pass pass:[REDACTED]",
+            )
+            self.assertEqual(
+                REPORT.sanitize("<p>sec\x1b[0mret&amp;&lt;&gt;&quot;</p>", sensitive),
                 "<p>[REDACTED]</p>",
             )
 
@@ -116,6 +144,51 @@ class GradleBuildReportTest(unittest.TestCase):
             self.assertEqual(metrics["elapsed_seconds"], 12)
             self.assertEqual(metrics["native_tasks"][0]["duration"], "0.456s")
             self.assertIn("FROM-CACHE", summary.read_text(encoding="utf-8"))
+
+    def test_info_log_and_html_redact_signing_values_split_by_ansi(self):
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parent.parent) as directory:
+            root = Path(directory)
+            (root / "local.properties").write_text(
+                'storePassword=secret&<>"\nkeyAlias=fluxdown\nstoreFile=/private/release.jks\n',
+                encoding="ISO-8859-1",
+            )
+            raw = root / "raw.log"
+            raw.write_text(
+                "\x1b[1m> Task :fluxdown-android:fluxCargoNdkRelease\x1b[0m "
+                "\x1b[32mFROM-CACHE\x1b[0m\n"
+                "Starting process: command apksigner --ks-pass pass:sec\x1b[0mret&<>\" "
+                "--ks-key-alias flux\x1b[0mdown --ks /private/\x1b[0mrelease.jks\n",
+                encoding="utf-8",
+            )
+            profiles = root / "build/reports/profile"
+            profiles.mkdir(parents=True)
+            (profiles / "profile-2026-10-08.html").write_text(
+                "<p>sec\x1b[0mret&amp;&lt;&gt;&quot;</p>"
+                "<table><tr><td>:fluxdown-android:fluxCargoNdkRelease</td>"
+                "<td>0.456s</td><td>FROM-CACHE</td></tr></table>",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}):
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    REPORT.report(raw, root)
+            self.assertIn("FROM-CACHE=1", stdout.getvalue())
+            output = root / "build/ci-reports"
+            metrics = json.loads((output / "timings.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["native_tasks"][0]["outcome"], "FROM-CACHE")
+            for file in output.rglob("*"):
+                if not file.is_file():
+                    continue
+                contents = file.read_text(encoding="utf-8")
+                self.assertNotIn("\x1b", contents)
+                self.assertNotIn('secret&<>"', contents)
+                self.assertNotIn("secret&amp;&lt;&gt;&quot;", contents)
+                self.assertNotIn("sec\x1b[0mret", contents)
+                self.assertNotIn("flux\x1b[0mdown", contents)
+                self.assertNotIn("/private/release.jks", contents)
+            sanitized_log = (output / "gradle.log").read_text(encoding="utf-8")
+            self.assertIn("pass:[REDACTED]", sanitized_log)
+            self.assertIn("--ks-key-alias [REDACTED]", sanitized_log)
+            self.assertIn("--ks [REDACTED]", sanitized_log)
 
     def test_absent_log_reports_no_false_cache_hit(self):
         with tempfile.TemporaryDirectory(dir=SCRIPT.parent.parent) as directory:
