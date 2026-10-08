@@ -171,11 +171,37 @@ jobs:
 
       - name: Test cache contracts and build optimized release APKs
         shell: bash
-        run: >-
-          ./gradlew --no-daemon
-          :app:testLeanbackReleaseUnitTest
-          :app:assembleLeanbackRelease
-          :app:assembleMobileRelease
+        run: |
+          set +e
+          gradle_log="${RUNNER_TEMP}/gradle.log"
+
+          ./gradlew --no-daemon --console=plain \
+            :app:testLeanbackDebugUnitTest \
+            :app:assembleLeanbackRelease \
+            :app:assembleMobileRelease \
+            2>&1 | tee "${gradle_log}"
+          gradle_status="${PIPESTATUS[0]}"
+
+          if [[ "${gradle_status}" -ne 0 ]]; then
+            diagnostic="$(
+              grep -E -B2 -A6 \
+                '(^FAILURE:|^\* What went wrong:|^Execution failed for task|^> Task .* FAILED|(^|[[:space:]])(e:|error:|Caused by:)|Could not |Compilation error)' \
+                "${gradle_log}" |
+              tail -n 160 |
+              head -c 12000
+            )"
+
+            if [[ -z "${diagnostic}" ]]; then
+              diagnostic="$(tail -n 80 "${gradle_log}" | head -c 12000)"
+            fi
+
+            diagnostic="${diagnostic//'%'/'%25'}"
+            diagnostic="${diagnostic//$'\r'/'%0D'}"
+            diagnostic="${diagnostic//$'\n'/'%0A'}"
+            echo "::error file=.github/workflows/fluxdown-draft-apk.yml,title=Gradle build failed::${diagnostic}"
+          fi
+
+          exit "${gradle_status}"
 
       - name: Collect and verify APKs
         id: collect
