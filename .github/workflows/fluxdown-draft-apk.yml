@@ -81,6 +81,42 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
+      - name: Cache Android FFmpeg executables and corresponding source
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/ffmpeg/jniLibs
+            build/ffmpeg/assets
+            build/ffmpeg/distribution
+          key: android-ffmpeg-${{ runner.os }}-${{ runner.arch }}-ndk-${{ env.NDK_VERSION }}-${{ hashFiles('scripts/build-android-ffmpeg.sh') }}
+
+      - name: Build Android FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-android-ffmpeg.sh \
+            --ndk "${ANDROID_NDK_HOME}" \
+            --output "${GITHUB_WORKSPACE}/build/ffmpeg"
+
+      - name: Verify Android FFmpeg build outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for abi in arm64-v8a armeabi-v7a; do
+            test -s "build/ffmpeg/jniLibs/${abi}/libffmpeg.so"
+            test -s "build/ffmpeg/assets/ffmpeg/BUILD-${abi}.txt"
+            "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+              --file-header "build/ffmpeg/jniLibs/${abi}/libffmpeg.so"
+          done
+          test -s build/ffmpeg/assets/ffmpeg/COPYING.LGPLv2.1
+          test -s build/ffmpeg/assets/ffmpeg/LICENSE.md
+          test -s build/ffmpeg/distribution/ffmpeg-8.0.3.tar.xz
+          test -s build/ffmpeg/distribution/ffmpeg-8.0.3.tar.xz.asc
+          test -s build/ffmpeg/distribution/FFmpeg-NOTICE.txt
+          cmp scripts/build-android-ffmpeg.sh build/ffmpeg/distribution/build-android-ffmpeg.sh
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -176,6 +212,7 @@ jobs:
           gradle_log="${RUNNER_TEMP}/gradle.log"
 
           ./gradlew --no-daemon --console=plain \
+            -Pfluxdown.ffmpegDir="${GITHUB_WORKSPACE}/build/ffmpeg/jniLibs" \
             :app:testLeanbackDebugUnitTest \
             :app:assembleLeanbackRelease \
             :app:assembleMobileRelease \
@@ -225,9 +262,25 @@ jobs:
             output="dist/${name}-${short_sha}.apk"
             mv "${apk}" "${output}"
             "${ANDROID_HOME}/build-tools/36.0.0/apksigner" verify --verbose --print-certs "${output}"
+            python - "${output}" <<'PY'
+          import sys
+          import zipfile
+
+          apk = sys.argv[1]
+          with zipfile.ZipFile(apk) as archive:
+              entries = archive.namelist()
+              ffmpeg = [name for name in entries if name.startswith("lib/") and name.endswith("/libffmpeg.so")]
+              if len(ffmpeg) != 1 or archive.getinfo(ffmpeg[0]).file_size == 0:
+                  raise SystemExit(f"Expected one nonempty ABI-specific FFmpeg executable in {apk}, found {ffmpeg}")
+              for notice in ("COPYING.LGPLv2.1", "LICENSE.md", "BUILD.txt"):
+                  name = f"assets/ffmpeg/{notice}"
+                  if name not in entries or archive.getinfo(name).file_size == 0:
+                      raise SystemExit(f"Missing FFmpeg notice {name} in {apk}")
+              print(f"Verified bundled FFmpeg: {apk}: {ffmpeg[0]}")
+          PY
           done
 
-          (cd dist && sha256sum -- *.apk > SHA256SUMS.txt)
+          cp build/ffmpeg/distribution/* dist/
           fluxdown_sha="$(git -C rust/fluxdown rev-parse HEAD)"
           cat > dist/SOURCE.txt <<EOF
           Root source: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}
@@ -235,7 +288,11 @@ jobs:
           FluxDown source: https://github.com/zerx-lab/FluxDown/tree/${fluxdown_sha}
           FluxDown commit: ${fluxdown_sha}
           FluxDown license: https://github.com/zerx-lab/FluxDown/blob/${fluxdown_sha}/LICENSE
+          FFmpeg source: https://ffmpeg.org/releases/ffmpeg-8.0.3.tar.xz
+          FFmpeg source, signature, pinned signing key, LGPL license and build script: included in these release assets
           EOF
+          (cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 |
+            sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
           echo "fluxdown_sha=${fluxdown_sha}" >> "${GITHUB_OUTPUT}"
           ls -lh dist
 
@@ -248,9 +305,107 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  ffmpeg-smoke:
+    name: Verify FFmpeg inside Android app
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      NDK_VERSION: "28.2.13676358"
+    steps:
+      - name: Check out smoke test and FFmpeg build script
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up JetBrains Runtime 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: jetbrains
+          java-version: "21"
+          java-package: jdk
+          cache: gradle
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install smoke test Android platform and NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "ndk;${NDK_VERSION}"
+          if [[ ! -e "${ANDROID_HOME}/platforms/android-37" ]]; then
+            test -d "${ANDROID_HOME}/platforms/android-37.0"
+            ln -s "${ANDROID_HOME}/platforms/android-37.0" "${ANDROID_HOME}/platforms/android-37"
+          fi
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "${GITHUB_ENV}"
+          chmod +x gradlew
+
+      - name: Cache FFmpeg emulator executable
+        id: ffmpeg-smoke-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/ffmpeg-smoke/jniLibs
+            build/ffmpeg-smoke/assets
+            build/ffmpeg-smoke/distribution
+          key: android-ffmpeg-smoke-x86_64-${{ runner.os }}-ndk-${{ env.NDK_VERSION }}-${{ hashFiles('scripts/build-android-ffmpeg.sh') }}
+
+      - name: Build FFmpeg for Android emulator
+        if: steps.ffmpeg-smoke-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-android-ffmpeg.sh \
+            --ndk "${ANDROID_NDK_HOME}" \
+            --output "${GITHUB_WORKSPACE}/build/ffmpeg-smoke" \
+            --abis x86_64
+
+      - name: Enable emulator hardware acceleration
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Verify offline FFmpeg merging on Android 10
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          target: default
+          disable-animations: true
+          emulator-boot-timeout: 600
+          script: bash scripts/test-android-ffmpeg.sh "${GITHUB_WORKSPACE}/build/ffmpeg-smoke/jniLibs"
+
+      - name: Record Android FFmpeg verification
+        shell: bash
+        run: |
+          {
+            echo "### Android FFmpeg smoke test"
+            echo
+            echo "Passed in an Android 10 (API 29) app targeting API 37: nativeLibraryDir execution, separated audio/video MP4 merge, and MPEG-TS to MP4 remux."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Preserve Android smoke test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-ffmpeg-smoke-${{ github.sha }}
+          path: |
+            build/ffmpeg-smoke/logs/
+            tests/ffmpeg-smoke/**/build/reports/
+            tests/ffmpeg-smoke/**/build/outputs/androidTest-results/
+          if-no-files-found: warn
+          retention-days: 7
+
   release:
     name: Create draft release
-    needs: build
+    needs: [build, ffmpeg-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -298,6 +453,7 @@ jobs:
           - FluxDown source: https://github.com/zerx-lab/FluxDown/tree/${FLUXDOWN_SHA}
 
           Assets contain the TV and mobile APKs for arm64-v8a and armeabi-v7a. Verify downloads with \`SHA256SUMS.txt\`.
+          FFmpeg 8.0.3 is bundled for offline media merging. Its corresponding source archive, signature, pinned release key, LGPL license, notices and Android build script are also included as assets.
           EOF
 
           if existing_draft="$(gh release view "${tag}" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
@@ -330,12 +486,18 @@ jobs:
             sleep 2
           done
 
-          gh release upload "${tag}" dist/*.apk dist/SHA256SUMS.txt dist/SOURCE.txt --clobber
+          gh release upload "${tag}" dist/* --clobber
 
           release_json="$(gh release view "${tag}" --json isDraft,targetCommitish,assets,url)"
           [[ "$(jq -r '.isDraft' <<< "${release_json}")" == "true" ]]
           [[ "$(jq -r '.targetCommitish' <<< "${release_json}")" == "${GITHUB_SHA}" ]]
           [[ "$(jq '[.assets[] | select(.name | endswith(".apk"))] | length' <<< "${release_json}")" -eq 4 ]]
+          for required_asset in ffmpeg-8.0.3.tar.xz ffmpeg-8.0.3.tar.xz.asc ffmpeg-devel.asc \
+            COPYING.LGPLv2.1 FFmpeg-LICENSE.md FFmpeg-NOTICE.txt build-android-ffmpeg.sh \
+            FFmpeg-BUILD-arm64-v8a.txt FFmpeg-BUILD-armeabi-v7a.txt SHA256SUMS.txt SOURCE.txt; do
+            jq --arg name "${required_asset}" --exit-status \
+              'any(.assets[]; .name == $name and .size > 0)' <<< "${release_json}" >/dev/null
+          done
 
           release_url="$(jq -r '.url' <<< "${release_json}")"
           echo "url=${release_url}" >> "${GITHUB_OUTPUT}"

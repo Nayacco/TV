@@ -70,6 +70,44 @@ public class FileResponderTest {
     }
 
     @Test
+    public void actualMp4OverridesTsFilenameAndManifestMetadata() throws Exception {
+        Path path = Files.createTempFile("file-responder-container", ".ts");
+        Files.write(path, new byte[]{0, 0, 0, 16, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm', 0, 0, 0, 0});
+        try {
+            assertEquals("video/mp4", FileResponder.resolveMimeType(path.toFile(), "application/x-mpegURL"));
+        } finally {
+            Files.deleteIfExists(path);
+        }
+    }
+
+    @Test
+    public void actualTsOverridesMp4FilenameAndMetadata() throws Exception {
+        Path path = Files.createTempFile("file-responder-container", ".mp4");
+        byte[] value = new byte[5 * 188];
+        for (int packet = 0; packet < 5; packet++) {
+            value[packet * 188] = 0x47;
+            value[packet * 188 + 3] = 0x10;
+        }
+        Files.write(path, value);
+        try {
+            assertEquals("video/mp2t", FileResponder.resolveMimeType(path.toFile(), "video/mp4"));
+        } finally {
+            Files.deleteIfExists(path);
+        }
+    }
+
+    @Test
+    public void unknownDirectFormatPreservesSuppliedMime() throws Exception {
+        Path path = Files.createTempFile("file-responder-container", ".bin");
+        Files.write(path, new byte[]{1, 2, 3, 4});
+        try {
+            assertEquals("video/x-matroska", FileResponder.resolveMimeType(path.toFile(), "video/x-matroska"));
+        } finally {
+            Files.deleteIfExists(path);
+        }
+    }
+
+    @Test
     public void headReturnsHeadersWithoutOpeningAFileBody() throws Exception {
         Path path = Files.createTempFile("file-responder", ".mp4");
         Files.write(path, new byte[]{1, 2, 3, 4});

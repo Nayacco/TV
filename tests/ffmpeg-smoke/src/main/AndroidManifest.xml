@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:label="FFmpeg smoke test"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity
+            android:name=".SmokeActivity"
+            android:exported="true" />
+    </application>
+</manifest>

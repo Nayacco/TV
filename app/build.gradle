@@ -44,6 +44,14 @@ android {
         viewBinding = true
     }
 
+    packaging {
+        jniLibs {
+            // FluxDown executes the packaged FFmpeg command from nativeLibraryDir.
+            useLegacyPackaging = true
+            keepDebugSymbols += ['**/libffmpeg.so']
+        }
+    }
+
     signingConfigs {
         release {
             storeFile file(localProps['storeFile'])

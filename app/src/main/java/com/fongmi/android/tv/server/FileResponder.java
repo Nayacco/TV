@@ -3,6 +3,8 @@ package com.fongmi.android.tv.server;
 import static fi.iki.elonen.NanoHTTPD.MIME_PLAINTEXT;
 import static fi.iki.elonen.NanoHTTPD.newFixedLengthResponse;
 
+import com.fongmi.android.tv.cache.CacheFileValidator;
+
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -38,6 +40,12 @@ public final class FileResponder {
     }
 
     public static String resolveMimeType(File file, String mime) {
+        try {
+            String container = CacheFileValidator.mediaMimeType(file);
+            if (container != null) return container;
+        } catch (IOException ignored) {
+            // Preserve name/metadata fallback for callers resolving an unreadable or absent file.
+        }
         String name = file.getName().toLowerCase(Locale.ROOT);
         if (name.endsWith(".ts")) return "video/mp2t";
         if (name.endsWith(".mp4")) return "video/mp4";

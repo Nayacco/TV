@@ -1,0 +1,50 @@
+plugins {
+    id 'com.android.application' version '9.3.1'
+}
+
+def ffmpegDir = providers.gradleProperty('fluxdown.ffmpegDir')
+if (!ffmpegDir.isPresent()) {
+    throw new GradleException('Pass -Pfluxdown.ffmpegDir=<Android FFmpeg jniLibs directory>')
+}
+
+def runtimeDir = layout.buildDirectory.dir('generated/runtime')
+def copyRuntime = tasks.register('copyFFmpegRuntime', Sync) {
+    from '../../rust/fluxdown-android/src/main/java/com/fongmi/fluxdown/FFmpegRuntime.java'
+    into runtimeDir.map { it.dir('com/fongmi/fluxdown') }
+}
+
+android {
+    namespace 'com.fongmi.ffmpegsmoke'
+    compileSdk 37
+
+    defaultConfig {
+        applicationId 'com.fongmi.ffmpegsmoke'
+        minSdk 24
+        targetSdk 37
+        versionCode 1
+        versionName '1'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            java.srcDir runtimeDir.get().asFile
+            jniLibs.srcDirs = [ffmpegDir.get()]
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += ['**/libffmpeg.so']
+        }
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn copyRuntime
+}

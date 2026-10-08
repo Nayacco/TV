@@ -93,7 +93,8 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         }
         // The Kotlin facade is idempotent and clears its own opening session after a failed start.
         // Calling through each time avoids a stale Java-side flag preventing a later retry.
-        FluxDownEngine.start(data.getAbsolutePath(), CachePaths.root().getAbsolutePath(), this);
+        FluxDownEngine.start(data.getAbsolutePath(), CachePaths.root().getAbsolutePath(),
+                App.get().getApplicationInfo().nativeLibraryDir, this);
     }
 
     public void load(Consumer<List<CacheMetadata>> callback) {
@@ -794,12 +795,16 @@ public final class CacheRepository implements FluxDownEngine.Listener {
         };
     }
 
-    private static String mime(File file, String fallback) {
+    private static String mime(File file, String fallback) throws java.io.IOException {
+        String container = CacheFileValidator.mediaMimeType(file);
+        if (container != null) return container;
         String lower = file.getName().toLowerCase(Locale.ROOT);
         if (lower.endsWith(".ts")) return "video/mp2t";
         if (lower.endsWith(".mp4")) return "video/mp4";
         String detected = URLConnection.guessContentTypeFromName(file.getName());
-        return detected == null ? fallback : detected;
+        if (detected != null) return detected;
+        // A source manifest MIME describes the download protocol, not the completed media file.
+        return CacheMediaUrl.isAdaptiveStream(null, fallback) ? "application/octet-stream" : fallback;
     }
 
     private static String emptyToNull(String value) {

@@ -11,9 +11,12 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
@@ -45,7 +48,7 @@ object FluxDownEngine {
     private var saveDir: String? = null
 
     @JvmStatic
-    fun start(dataDir: String, saveDir: String, listener: Listener) {
+    fun start(dataDir: String, saveDir: String, nativeLibraryDir: String, listener: Listener) {
         val opening = synchronized(lock) {
             val current = sessionOpening
             if (current != null) {
@@ -58,7 +61,10 @@ object FluxDownEngine {
                 this.listener = listener
                 this.dataDir = dataDir
                 this.saveDir = saveDir
-                scope.async { FluxBridge.openLocal(dataDir, saveDir, "android") }.also {
+                scope.async {
+                    verifyFfmpeg(dataDir, nativeLibraryDir)
+                    FluxBridge.openLocal(dataDir, saveDir, "android")
+                }.also {
                     sessionOpening = it
                 }
             }
@@ -185,6 +191,37 @@ object FluxDownEngine {
     private suspend fun awaitSession(): HostSession {
         val opening = sessionOpening ?: throw IllegalStateException("FluxDownEngine.start must be called first")
         return opening.await()
+    }
+
+    private suspend fun verifyFfmpeg(dataDir: String, nativeLibraryDir: String) {
+        val executable = FFmpegRuntime.prepare(dataDir, nativeLibraryDir)
+        val process = ProcessBuilder(executable.absolutePath, "-version").redirectErrorStream(true).start()
+        val output = scope.async { process.inputStream.bufferedReader().use { it.readText() } }
+        try {
+            withTimeout(5_000) {
+                val version = output.await()
+                // Process.waitFor(timeout) is unavailable on API 24/25.
+                while (true) {
+                    val status = try {
+                        process.exitValue()
+                    } catch (_: IllegalThreadStateException) {
+                        delay(20)
+                        continue
+                    }
+                    check(status == 0 && version.startsWith("ffmpeg version")) {
+                        "Packaged Android FFmpeg failed its startup check: ${version.take(500)}"
+                    }
+                    break
+                }
+            }
+        } catch (error: TimeoutCancellationException) {
+            // A failed component check is an engine error, not an intentional stop().
+            // Let start()/command() clear the failed opening and notify the cache UI.
+            throw IllegalStateException("Packaged Android FFmpeg startup check timed out", error)
+        } finally {
+            process.destroy()
+            output.cancel()
+        }
     }
 
     private fun collectSignalsOnce(session: HostSession) {

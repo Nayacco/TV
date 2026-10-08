@@ -16,6 +16,8 @@ plugins {
  * Optional Gradle properties:
  *   fluxdown.abis=arm64-v8a,armeabi-v7a
  *   fluxdown.cargoBin=C:/Users/me/.cargo/bin
+ *   fluxdown.ffmpegDir=/path/to/build/ffmpeg/jniLibs
+ *     Build first with scripts/build-android-ffmpeg.sh (Linux/NDK); includes sibling assets/.
  */
 object FluxRust {
     const val PACKAGE = "fluxdown_mobile"
@@ -158,6 +160,40 @@ abstract class FluxUniffiBindgen @Inject constructor(private val exec: ExecOpera
     }
 }
 
+abstract class FluxFFmpegBundle @Inject constructor(private val files: FileSystemOperations) : DefaultTask() {
+    @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val nativeInput: DirectoryProperty
+    @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val assetsInput: DirectoryProperty
+    @get:Input abstract val abis: Property<String>
+    @get:OutputDirectory abstract val nativeOutput: DirectoryProperty
+    @get:OutputDirectory abstract val assetsOutput: DirectoryProperty
+
+    @TaskAction
+    fun bundle() {
+        val requested = FluxRust.parseAbis(abis.get())
+        requested.forEach { abi ->
+            val binary = File(nativeInput.get().asFile, "$abi/libffmpeg.so")
+            check(binary.isFile && binary.length() > 0) {
+                "Missing Android FFmpeg for $abi. Run scripts/build-android-ffmpeg.sh or set fluxdown.ffmpegDir."
+            }
+        }
+        check(File(assetsInput.get().asFile, "ffmpeg/COPYING.LGPLv2.1").isFile) {
+            "Android FFmpeg bundle is missing its license notices"
+        }
+        files.sync {
+            from(nativeInput)
+            requested.forEach { include("$it/libffmpeg.so") }
+            into(nativeOutput)
+        }
+        files.sync {
+            from(assetsInput)
+            include("ffmpeg/**")
+            into(assetsOutput)
+        }
+    }
+}
+
 android {
     namespace = "com.fongmi.fluxdown"
     compileSdk = 37
@@ -176,6 +212,9 @@ android {
 val fluxWorkspace = rootProject.layout.projectDirectory.dir("rust/fluxdown")
 val configuredAbis = providers.gradleProperty("fluxdown.abis").orElse("arm64-v8a,armeabi-v7a")
 val configuredCargoBin = providers.gradleProperty("fluxdown.cargoBin")
+val configuredFfmpeg = providers.gradleProperty("fluxdown.ffmpegDir")
+    .map { rootProject.file(it) }
+    .orElse(rootProject.layout.buildDirectory.dir("ffmpeg/jniLibs").map { it.asFile })
 val localPropertiesText = providers.provider {
     rootProject.file("local.properties").takeIf { it.isFile }?.readText() ?: ""
 }
@@ -198,6 +237,14 @@ val fluxBindingsLibrary = tasks.register<FluxCargoNdk>("fluxCargoNdkBindings") {
     abis.set(configuredAbis.map { it.substringBefore(',').trim() })
     release.set(false)
     outputDir.set(layout.buildDirectory.dir("intermediates/fluxdown/bindingsLib"))
+}
+
+val fluxFfmpeg = tasks.register<FluxFFmpegBundle>("fluxFFmpegBundle") {
+    nativeInput.fileProvider(configuredFfmpeg)
+    assetsInput.fileProvider(configuredFfmpeg.map { File(it.parentFile, "assets") })
+    abis.set(configuredAbis)
+    nativeOutput.set(layout.buildDirectory.dir("generated/ffmpeg/jniLibs"))
+    assetsOutput.set(layout.buildDirectory.dir("generated/ffmpeg/assets"))
 }
 
 androidComponents {
@@ -226,6 +273,10 @@ androidComponents {
         }
         checkNotNull(variant.sources.jniLibs) { "AGP did not expose generated jniLibs for ${variant.name}" }
             .addGeneratedSourceDirectory(nativeBuild, FluxCargoNdk::outputDir)
+        checkNotNull(variant.sources.jniLibs)
+            .addGeneratedSourceDirectory(fluxFfmpeg, FluxFFmpegBundle::nativeOutput)
+        checkNotNull(variant.sources.assets)
+            .addGeneratedSourceDirectory(fluxFfmpeg, FluxFFmpegBundle::assetsOutput)
         kotlinSources.addGeneratedSourceDirectory(bindgen, FluxUniffiBindgen::outputDir)
     }
 }
