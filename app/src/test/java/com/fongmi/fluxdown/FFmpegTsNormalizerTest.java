@@ -37,7 +37,14 @@ public class FFmpegTsNormalizerTest {
                         output.set(new File(argv.get(argv.size() - 1)));
                         assertEquals(source.getCanonicalFile().getParentFile(), cleaned.get().getParentFile());
                         assertEquals(source.getCanonicalFile().getParentFile(), output.get().getParentFile());
-                        assertEquals(0x47, Files.readAllBytes(cleaned.get().toPath())[0] & 0xff);
+                        byte[] cleanedBytes = Files.readAllBytes(cleaned.get().toPath());
+                        byte[] strippedBytes = strippedWrappedSegments();
+                        assertOnlyContinuityNibblesDiffer(strippedBytes, cleanedBytes);
+                        for (int packet = 0; packet < 12; packet++) {
+                            assertEquals("The cleaned input must carry one continuous PID counter at packet " + packet,
+                                    packet & 0x0f, packetCc(cleanedBytes, packet));
+                        }
+                        assertStrictRemuxCommand(argv);
                         Files.write(output.get().toPath(), REMUXED);
                         return new FakeProcess("ok", 0);
                     }, 1000, 8192)) {
@@ -73,16 +80,7 @@ public class FFmpegTsNormalizerTest {
                 assertEquals(1, source.getParentFile().list().length);
             }
             assertArrayEquals(REMUXED, Files.readAllBytes(source.toPath()));
-            List<String> argv = command.get();
-            assertEquals("file", argv.get(argv.indexOf("-protocol_whitelist") + 1));
-            assertEquals("mpegts", argv.get(argv.indexOf("-format_whitelist") + 1));
-            assertEquals("mpegts", argv.get(argv.indexOf("-f") + 1));
-            assertEquals("mpegts", argv.get(argv.lastIndexOf("-f") + 1));
-            assertTrue(argv.contains("0:v:0"));
-            assertTrue(argv.contains("0:a:0"));
-            assertFalse(argv.contains("0:a:0?"));
-            assertEquals("copy", argv.get(argv.indexOf("-c") + 1));
-            assertTrue(argv.contains("-xerror"));
+            assertStrictRemuxCommand(command.get());
         });
     }
 
@@ -517,6 +515,55 @@ public class FFmpegTsNormalizerTest {
         return bytes;
     }
 
+    private static byte[] independentSegmentPackets(int count) {
+        byte[] bytes = new byte[count * 188];
+        for (int packet = 0; packet < count; packet++) {
+            int offset = packet * 188;
+            Arrays.fill(bytes, offset, offset + 188, (byte) (0x50 + packet));
+            bytes[offset] = 0x47;
+            bytes[offset + 1] = 0x40;
+            bytes[offset + 2] = 0;
+            bytes[offset + 3] = (byte) (0x10 | (packet & 0x0f));
+        }
+        return bytes;
+    }
+
+    private static byte[] strippedWrappedSegments() throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        output.write(independentSegmentPackets(6));
+        output.write(independentSegmentPackets(6));
+        return output.toByteArray();
+    }
+
+    private static int packetCc(byte[] media, int packet) {
+        return media[packet * 188 + 3] & 0x0f;
+    }
+
+    private static void assertOnlyContinuityNibblesDiffer(byte[] expected, byte[] actual) {
+        assertEquals(expected.length, actual.length);
+        for (int index = 0; index < expected.length; index++) {
+            if (index % 188 == 3) {
+                assertEquals("Only the continuity counter nibble may change at byte " + index,
+                        expected[index] & 0xf0, actual[index] & 0xf0);
+            } else {
+                assertEquals("Unexpected cleaned input change at byte " + index,
+                        expected[index] & 0xff, actual[index] & 0xff);
+            }
+        }
+    }
+
+    private static void assertStrictRemuxCommand(List<String> argv) {
+        assertTrue(argv.contains("-xerror"));
+        assertEquals("file", argv.get(argv.indexOf("-protocol_whitelist") + 1));
+        assertEquals("mpegts", argv.get(argv.indexOf("-format_whitelist") + 1));
+        assertEquals("mpegts", argv.get(argv.indexOf("-f") + 1));
+        assertEquals("mpegts", argv.get(argv.lastIndexOf("-f") + 1));
+        assertTrue(argv.contains("0:v:0"));
+        assertTrue(argv.contains("0:a:0"));
+        assertFalse(argv.contains("0:a:0?"));
+        assertEquals("copy", argv.get(argv.indexOf("-c") + 1));
+    }
+
     private static byte[] wrapped() throws IOException {
         byte[] prefix = new byte[126];
         Arrays.fill(prefix, (byte) 0x50);
@@ -524,9 +571,9 @@ public class FFmpegTsNormalizerTest {
         System.arraycopy(signature, 0, prefix, 0, signature.length);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         output.write(prefix);
-        output.write(packets(6));
+        output.write(independentSegmentPackets(6));
         output.write(prefix);
-        output.write(packets(6));
+        output.write(independentSegmentPackets(6));
         return output.toByteArray();
     }
 

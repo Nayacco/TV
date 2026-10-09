@@ -1,6 +1,7 @@
 package com.fongmi.fluxdown;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
@@ -37,6 +38,123 @@ public class PngTsCleanerTest {
 
         assertArrayEquals(join(first, second), Files.readAllBytes(output.toPath()));
         assertArrayEquals(wrapped, Files.readAllBytes(source.toPath()));
+    }
+
+    @Test
+    public void remuxModeStitchesResetCountersPerPidAtConfirmedWrappers() throws Exception {
+        byte[] first = join(
+                packet(0x100, 1, 8, false, 0x21),
+                packet(0x101, 1, 4, false, 0x31),
+                packet(0x100, 1, 9, false, 0x22),
+                packet(0x101, 1, 5, false, 0x32),
+                packet(0x102, 1, 15, false, 0x41));
+        byte[] second = join(
+                packet(0x100, 1, 0, false, 0x51),
+                packet(0x101, 1, 0, false, 0x61),
+                packet(0x100, 1, 1, false, 0x52),
+                packet(0x101, 1, 1, false, 0x62),
+                packet(0x102, 1, 0, false, 0x42),
+                packet(0x103, 1, 7, false, 0x72));
+        byte[] wrapped = join(prefix(126), first, prefix(241), second);
+
+        byte[] stripOnly = cleanStream(wrapped, false);
+        byte[] remuxed = cleanStream(wrapped, true);
+
+        assertArrayEquals("The public cleaner must remain byte-exact strip-only",
+                join(first, second), stripOnly);
+        assertArrayEquals("The first segment must remain byte-exact in remux mode",
+                java.util.Arrays.copyOfRange(stripOnly, 0, first.length),
+                java.util.Arrays.copyOfRange(remuxed, 0, first.length));
+        assertPacketCc(remuxed, 5, 10);
+        assertPacketCc(remuxed, 6, 6);
+        assertPacketCc(remuxed, 7, 11);
+        assertPacketCc(remuxed, 8, 7);
+        assertPacketCc(remuxed, 9, 0);
+        assertArrayEquals("A PID first seen after a seam must remain byte-exact",
+                packetAt(stripOnly, 10), packetAt(remuxed, 10));
+        assertOnlyContinuityNibblesDiffer(stripOnly, remuxed);
+    }
+
+    @Test
+    public void remuxFileModeCreatesStitchedOutputWithoutChangingSource() throws Exception {
+        byte[] first = join(
+                packet(0x100, 1, 5, false, 0x21),
+                packet(0x100, 1, 6, false, 0x22),
+                packet(0x100, 1, 7, false, 0x23),
+                packet(0x100, 1, 8, false, 0x24),
+                packet(0x100, 1, 9, false, 0x25));
+        byte[] second = join(
+                packet(0x100, 1, 0, false, 0x31),
+                packet(0x100, 1, 1, false, 0x32),
+                packet(0x100, 1, 2, false, 0x33),
+                packet(0x100, 1, 3, false, 0x34),
+                packet(0x100, 1, 4, false, 0x35));
+        byte[] wrapped = join(prefix(126), first, prefix(126), second);
+        File source = writeSource("remux-file.ts", wrapped);
+        File output = new File(temporary.getRoot(), "remux-file-clean.ts");
+
+        PngTsCleaner.cleanForRemux(source, output);
+
+        byte[] remuxed = Files.readAllBytes(output.toPath());
+        assertPacketCc(remuxed, 5, 10);
+        assertPacketCc(remuxed, 9, 14);
+        assertOnlyContinuityNibblesDiffer(join(first, second), remuxed);
+        assertArrayEquals(wrapped, Files.readAllBytes(source.toPath()));
+    }
+
+    @Test
+    public void remuxModeUsesOneOffsetAndPreservesInternalCounterErrors() throws Exception {
+        byte[] first = join(
+                packet(0x100, 1, 1, false, 0x21),
+                packet(0x100, 1, 2, false, 0x22),
+                packet(0x100, 1, 3, false, 0x23),
+                packet(0x100, 1, 4, false, 0x24),
+                packet(0x100, 1, 5, false, 0x25));
+        byte[] second = join(
+                packet(0x100, 1, 0, false, 0x31),
+                packet(0x100, 1, 1, false, 0x32),
+                packet(0x100, 1, 5, false, 0x33),
+                packet(0x100, 1, 6, false, 0x34),
+                packet(0x100, 1, 7, false, 0x35));
+        byte[] wrapped = join(prefix(126), first, prefix(126), second);
+
+        byte[] remuxed = cleanStream(wrapped, true);
+
+        assertPacketCc(remuxed, 5, 6);
+        assertPacketCc(remuxed, 6, 7);
+        assertPacketCc(remuxed, 7, 11);
+        assertPacketCc(remuxed, 8, 12);
+        assertPacketCc(remuxed, 9, 13);
+        assertOnlyContinuityNibblesDiffer(join(first, second), remuxed);
+    }
+
+    @Test
+    public void remuxModeHandlesAdaptationOnlyNullPidWraparoundAndDiscontinuity() throws Exception {
+        byte[] first = join(
+                packet(0x120, 1, 14, false, 0x21),
+                packet(0x120, 1, 15, false, 0x22),
+                packet(0x130, 1, 7, false, 0x31),
+                packet(0x140, 1, 15, false, 0x41),
+                packet(0x1fff, 1, 9, false, 0x71));
+        byte[] second = join(
+                packet(0x120, 2, 3, false, 0x51),
+                packet(0x120, 1, 4, false, 0x52),
+                packet(0x130, 3, 2, true, 0x61),
+                packet(0x130, 1, 3, false, 0x62),
+                packet(0x140, 1, 0, false, 0x42),
+                packet(0x1fff, 1, 1, false, 0x72));
+        byte[] wrapped = join(prefix(126), first, prefix(126), second);
+
+        byte[] stripOnly = cleanStream(wrapped, false);
+        byte[] remuxed = cleanStream(wrapped, true);
+
+        assertPacketCc(remuxed, 5, 15);
+        assertPacketCc(remuxed, 6, 0);
+        assertPacketCc(remuxed, 7, 2);
+        assertPacketCc(remuxed, 8, 3);
+        assertPacketCc(remuxed, 9, 0);
+        assertArrayEquals(packetAt(stripOnly, 10), packetAt(remuxed, 10));
+        assertOnlyContinuityNibblesDiffer(stripOnly, remuxed);
     }
 
     @Test
@@ -365,6 +483,55 @@ public class PngTsCleanerTest {
         } catch (IOException expected) {
             assertFalse(output.exists());
             assertArrayEquals(wrapped, Files.readAllBytes(source.toPath()));
+        }
+    }
+
+    private static byte[] cleanStream(byte[] wrapped, boolean remux) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        if (remux) {
+            PngTsCleaner.cleanForRemux(new ByteArrayInputStream(wrapped), output);
+        } else {
+            PngTsCleaner.clean(new ByteArrayInputStream(wrapped), output);
+        }
+        return output.toByteArray();
+    }
+
+    private static byte[] packet(int pid, int adaptationControl, int cc,
+                                 boolean discontinuity, int payload) {
+        byte[] packet = new byte[188];
+        java.util.Arrays.fill(packet, (byte) payload);
+        packet[0] = 0x47;
+        packet[1] = (byte) ((pid >>> 8) & 0x1f);
+        packet[2] = (byte) pid;
+        packet[3] = (byte) ((adaptationControl << 4) | (cc & 0x0f));
+        if (adaptationControl == 2) {
+            packet[4] = (byte) 183;
+            packet[5] = (byte) (discontinuity ? 0x80 : 0);
+        } else if (adaptationControl == 3) {
+            packet[4] = 1;
+            packet[5] = (byte) (discontinuity ? 0x80 : 0);
+        }
+        return packet;
+    }
+
+    private static void assertPacketCc(byte[] media, int packetIndex, int expectedCc) {
+        assertEquals(expectedCc, media[packetIndex * 188 + 3] & 0x0f);
+    }
+
+    private static byte[] packetAt(byte[] media, int packetIndex) {
+        return java.util.Arrays.copyOfRange(media, packetIndex * 188, (packetIndex + 1) * 188);
+    }
+
+    private static void assertOnlyContinuityNibblesDiffer(byte[] expected, byte[] actual) {
+        assertEquals(expected.length, actual.length);
+        for (int index = 0; index < expected.length; index++) {
+            if (index % 188 == 3) {
+                assertEquals("Only the CC nibble may differ at byte " + index,
+                        expected[index] & 0xf0, actual[index] & 0xf0);
+            } else {
+                assertEquals("Unexpected byte change at " + index,
+                        expected[index] & 0xff, actual[index] & 0xff);
+            }
         }
     }
 

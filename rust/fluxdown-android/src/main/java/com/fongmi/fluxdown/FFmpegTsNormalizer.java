@@ -66,7 +66,7 @@ public final class FFmpegTsNormalizer {
         boolean retained = false;
         IOException failure = null;
         try {
-            PngTsCleaner.clean(input, cleaned);
+            PngTsCleaner.cleanForRemux(input, cleaned);
             checkInterrupted();
             requirePrivateFile(cleaned, parent, input);
             output = File.createTempFile(".fluxdown-remux-", ".ts", parent);

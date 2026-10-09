@@ -44,6 +44,14 @@ public final class PngTsCleaner {
      * This validates packet structure, not media decodability or episode completeness.
      */
     public static void clean(File source, File output) throws IOException {
+        cleanFile(source, output, false);
+    }
+
+    static void cleanForRemux(File source, File output) throws IOException {
+        cleanFile(source, output, true);
+    }
+
+    private static void cleanFile(File source, File output, boolean stitchContinuity) throws IOException {
         checkInterrupted();
         if (source == null || !source.isFile() || !source.canRead()) {
             throw new IOException("Source is not a readable file");
@@ -55,7 +63,7 @@ public final class PngTsCleaner {
         try (FileInputStream input = new FileInputStream(source);
              FileOutputStream fileOutput = new FileOutputStream(output);
              BufferedOutputStream destination = new BufferedOutputStream(fileOutput, 64 * 1024)) {
-            clean(input, destination);
+            clean(input, destination, stitchContinuity);
         } catch (IOException | RuntimeException | Error failure) {
             try {
                 if (!output.delete() && output.exists()) {
@@ -71,22 +79,35 @@ public final class PngTsCleaner {
     // The same pipeline is exercised with short-read/cancelled I/O in JVM tests. Callers own
     // the streams; file lifecycle and removal of partial outputs belong to the File overload.
     static void clean(InputStream source, OutputStream output) throws IOException {
+        clean(source, output, false);
+    }
+
+    static void cleanForRemux(InputStream source, OutputStream output) throws IOException {
+        clean(source, output, true);
+    }
+
+    private static void clean(InputStream source, OutputStream output,
+                              boolean stitchContinuity) throws IOException {
         checkInterrupted();
         PushbackInputStream input = new PushbackInputStream(
                 new BufferedInputStream(source, 64 * 1024), LOOKAHEAD_BYTES);
         byte[] lookahead = new byte[LOOKAHEAD_BYTES];
         byte[] packet = new byte[PACKET_BYTES];
+        ContinuityState continuity = stitchContinuity ? new ContinuityState() : null;
         stripPrefix(input, lookahead);
+        if (continuity != null) continuity.beginSegment();
         while (true) {
             int count = readFully(input, packet);
             checkInterrupted();
             if (count == 0) return;
             if (count != PACKET_BYTES) throw new IOException("Truncated TS packet");
             if (validPacket(packet, 0)) {
+                if (continuity != null) continuity.rewrite(packet);
                 output.write(packet);
             } else if (pngSignature(packet)) {
                 input.unread(packet);
                 stripPrefix(input, lookahead);
+                if (continuity != null) continuity.beginSegment();
             } else {
                 throw new IOException("Invalid TS packet boundary without a PNG prefix");
             }
@@ -120,6 +141,63 @@ public final class PngTsCleaner {
             }
         }
         throw new IOException("No confirmed 188-byte TS sequence within the PNG prefix scan limit");
+    }
+
+    private static final class ContinuityState {
+        private static final int PID_COUNT = 8192;
+        private static final int NULL_PID = 0x1fff;
+
+        private final byte[] lastOutputCc = new byte[PID_COUNT];
+        private final boolean[] hasLast = new boolean[PID_COUNT];
+        private final byte[] segmentOffset = new byte[PID_COUNT];
+        private final int[] offsetEpoch = new int[PID_COUNT];
+        private int epoch;
+
+        void beginSegment() {
+            if (epoch == Integer.MAX_VALUE) {
+                java.util.Arrays.fill(offsetEpoch, 0);
+                epoch = 1;
+            } else {
+                epoch++;
+            }
+        }
+
+        void rewrite(byte[] packet) {
+            int pid = ((packet[1] & 0x1f) << 8) | (packet[2] & 0xff);
+            if (pid == NULL_PID) return;
+
+            int inputCc = packet[3] & 0x0f;
+            int adaptationControl = (packet[3] >>> 4) & 3;
+            if (declaresDiscontinuity(packet, adaptationControl)) {
+                segmentOffset[pid] = 0;
+                offsetEpoch[pid] = epoch;
+                lastOutputCc[pid] = (byte) inputCc;
+                hasLast[pid] = true;
+                return;
+            }
+
+            if (offsetEpoch[pid] != epoch) {
+                int offset = 0;
+                if (hasLast[pid]) {
+                    boolean hasPayload = adaptationControl == 1 || adaptationControl == 3;
+                    int expectedCc = (lastOutputCc[pid] + (hasPayload ? 1 : 0)) & 0x0f;
+                    offset = (expectedCc - inputCc) & 0x0f;
+                }
+                segmentOffset[pid] = (byte) offset;
+                offsetEpoch[pid] = epoch;
+            }
+
+            int outputCc = (inputCc + segmentOffset[pid]) & 0x0f;
+            packet[3] = (byte) ((packet[3] & 0xf0) | outputCc);
+            lastOutputCc[pid] = (byte) outputCc;
+            hasLast[pid] = true;
+        }
+
+        private static boolean declaresDiscontinuity(byte[] packet, int adaptationControl) {
+            if (adaptationControl != 2 && adaptationControl != 3) return false;
+            int adaptationLength = packet[4] & 0xff;
+            return adaptationLength > 0 && (packet[5] & 0x80) != 0;
+        }
     }
 
     private static boolean pngSignature(byte[] bytes) {

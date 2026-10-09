@@ -26,12 +26,16 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** Executes packaged binaries as an ordinary target-37 app, not as adb's shell user. */
 public final class SmokeActivity extends Activity {
     private static final String TAG = "FFmpegSmoke";
     private static final long PROCESS_TIMEOUT_MS = 10_000;
+    private static final int TS_PACKET_BYTES = 188;
+    private static final int TS_NULL_PID = 0x1fff;
+    private static final int FFMPEG_DEFAULT_MAX_PES_PAYLOAD_BYTES = 204800;
     private final StringBuilder summary = new StringBuilder();
     private File work;
     private int invocation;
@@ -104,7 +108,7 @@ public final class SmokeActivity extends Activity {
         run(ffmpeg, "-y", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=10",
                 "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "1",
                 "-c:v", "mpeg2video", "-c:a", "aac", "-threads", "1", "-pix_fmt", "yuv420p",
-                "-f", "mpegts", ts.getAbsolutePath());
+                "-omit_video_pes_length", "1", "-f", "mpegts", ts.getAbsolutePath());
         try (FileInputStream input = new FileInputStream(ts)) {
             require(input.read() == 0x47, "Generated TS fixture has no MPEG-TS sync byte");
         }
@@ -133,14 +137,18 @@ public final class SmokeActivity extends Activity {
 
     private void requirePngWrappedTs(File ffmpeg, File ts) throws Exception {
         File wrapped = new File(work, "png-wrapped.ts");
+        File flattened = new File(work, "png-reset-flattened.ts");
         File cleaned = new File(work, "png-cleaned.ts");
-        require(ts.length() % 188 == 0 && ts.length() >= 10 * 188, "TS fixture must contain complete packets");
-        long split = ts.length() / 188 / 2 * 188;
-        try (FileInputStream input = new FileInputStream(ts); FileOutputStream output = new FileOutputStream(wrapped)) {
+        byte[] continuous = readFile(ts);
+        byte[] continuousDigest = fileDigest(ts);
+        ResetFixture fixture = resetSecondSegmentContinuity(continuous);
+        requireResetChangesOnlyContinuityCounters(continuous, fixture.flattened, fixture.splitBytes);
+        writeFile(flattened, fixture.flattened);
+        try (FileOutputStream output = new FileOutputStream(wrapped)) {
             output.write(pngPrefix(126));
-            copyBytes(input, output, split);
+            output.write(fixture.flattened, 0, fixture.splitBytes);
             output.write(pngPrefix(211));
-            copyBytes(input, output, ts.length() - split);
+            output.write(fixture.flattened, fixture.splitBytes, fixture.flattened.length - fixture.splitBytes);
         }
         byte[] wrappedDigest = fileDigest(wrapped);
         require(PngTsCleaner.hasPngPrefix(wrapped), "Wrapped fixture must exercise the production PNG detection");
@@ -148,8 +156,18 @@ public final class SmokeActivity extends Activity {
         require(before.contains("png_pipe") && before.contains("not on whitelist"),
                 "Wrapped fixture did not reproduce the original FFmpeg detection failure: " + before);
         PngTsCleaner.clean(wrapped, cleaned);
-        require(Arrays.equals(fileDigest(ts), fileDigest(cleaned)), "Cleaner lost or altered TS packet bytes");
+        require(Arrays.equals(fixture.flattened, readFile(cleaned)),
+                "Public cleaner must strip wrappers without repairing continuity counters");
         require(Arrays.equals(wrappedDigest, fileDigest(wrapped)), "Cleaner changed its original input");
+
+        String rawFailure = runExpectingFailure(ffmpeg, "-v", "error", "-xerror", "-f", "mpegts",
+                "-i", flattened.getAbsolutePath(), "-map", "0:v:0", "-map", "0:a:0",
+                "-c", "copy", "-f", "null", "-");
+        String rawFailureLower = rawFailure.toLowerCase(Locale.ROOT);
+        require(rawFailureLower.contains("corrupt input packet")
+                        || rawFailureLower.contains("invalid data found")
+                        || rawFailureLower.contains("packet corrupt"),
+                "Strict FFmpeg failure did not report corrupt TS continuity: " + rawFailure);
 
         try (FFmpegTsNormalizer.Prepared prepared = FFmpegTsNormalizer.prepare(ffmpeg, wrapped,
                 SmokeActivity::requireAndroidTracks)) {
@@ -164,7 +182,8 @@ public final class SmokeActivity extends Activity {
         String after = FFmpegProbe.inspect(ffmpeg, wrapped);
         require(after.contains("Input #0, mpegts") && after.contains("Video:") && after.contains("Audio:"),
                 "Normalized file does not contain both TS streams: " + after);
-        summary.append("Production PNG multi-segment cleanup: byte-identical TS, forced stream-copy remux, Android tracks/samples, commit: OK\n");
+        require(Arrays.equals(continuousDigest, fileDigest(ts)), "Fixture construction changed the continuous TS oracle");
+        summary.append("PNG-wrapped reset segments: raw strict FFmpeg failure reproduced, production continuity repair/remux, Android tracks/samples, commit: OK\n");
 
         File truncated = new File(work, "png-truncated.ts");
         try (FileInputStream input = new FileInputStream(ts); FileOutputStream output = new FileOutputStream(truncated)) {
@@ -184,6 +203,207 @@ public final class SmokeActivity extends Activity {
         require(rejected && Arrays.equals(truncatedDigest, fileDigest(truncated)), "Rejected input was changed");
         require(work.list().length == filesBefore, "Failed normalization left temporary files");
         summary.append("Production truncated TS rejection: unchanged original, no temporary-file leak: OK\n");
+    }
+
+    private static ResetFixture resetSecondSegmentContinuity(byte[] continuous) throws IOException {
+        require(continuous.length % TS_PACKET_BYTES == 0
+                        && continuous.length >= 10 * TS_PACKET_BYTES,
+                "TS fixture must contain at least ten complete packets");
+        int packetCount = continuous.length / TS_PACKET_BYTES;
+        int[] previousPacket = new int[packetCount];
+        int[] previousPesStart = new int[packetCount];
+        int[] lastPacketByPid = new int[TS_NULL_PID + 1];
+        int[] lastPesStartByPid = new int[TS_NULL_PID + 1];
+        Arrays.fill(previousPacket, -1);
+        Arrays.fill(previousPesStart, -1);
+        Arrays.fill(lastPacketByPid, -1);
+        Arrays.fill(lastPesStartByPid, -1);
+        for (int packet = 0; packet < packetCount; packet++) {
+            int offset = packet * TS_PACKET_BYTES;
+            validateTsPacket(continuous, offset);
+            int pid = tsPid(continuous, offset);
+            previousPacket[packet] = lastPacketByPid[pid];
+            lastPacketByPid[pid] = packet;
+            previousPesStart[packet] = lastPesStartByPid[pid];
+            if (videoPesPayloadOffset(continuous, offset) >= 0) lastPesStartByPid[pid] = packet;
+        }
+
+        int midpoint = packetCount / 2;
+        int splitPacket = -1;
+        for (int distance = 0; distance < packetCount && splitPacket < 0; distance++) {
+            int before = midpoint - distance;
+            int after = midpoint + distance;
+            if (isResetSplitCandidate(continuous, before, packetCount, previousPacket, previousPesStart)) {
+                splitPacket = before;
+            } else if (after != before
+                    && isResetSplitCandidate(continuous, after, packetCount, previousPacket, previousPesStart)) {
+                splitPacket = after;
+            }
+        }
+        require(splitPacket >= 5 && packetCount - splitPacket >= 5,
+                "Could not find a safe PES continuity-reset split near the TS midpoint");
+
+        byte[] flattened = Arrays.copyOf(continuous, continuous.length);
+        int[] deltaByPid = new int[TS_NULL_PID + 1];
+        Arrays.fill(deltaByPid, -1);
+        for (int packet = splitPacket; packet < packetCount; packet++) {
+            int offset = packet * TS_PACKET_BYTES;
+            int pid = tsPid(flattened, offset);
+            if (pid == TS_NULL_PID) continue;
+            int counter = flattened[offset + 3] & 0x0f;
+            if (deltaByPid[pid] < 0) deltaByPid[pid] = (16 - counter) & 0x0f;
+            flattened[offset + 3] = (byte) ((flattened[offset + 3] & 0xf0)
+                    | ((counter + deltaByPid[pid]) & 0x0f));
+        }
+        int splitBytes = splitPacket * TS_PACKET_BYTES;
+        require((flattened[splitBytes + 3] & 0x0f) == 0,
+                "Selected PES PID did not reset its first second-segment continuity counter to zero");
+        return new ResetFixture(flattened, splitBytes);
+    }
+
+    private static boolean isResetSplitCandidate(byte[] ts, int packet, int packetCount,
+                                                 int[] previousPacket, int[] previousPesStart) throws IOException {
+        if (packet < 5 || packetCount - packet < 5) return false;
+        int offset = packet * TS_PACKET_BYTES;
+        if (previousPacket[packet] < 0 || previousPesStart[packet] < 0
+                || videoPesPayloadOffset(ts, offset) < 0
+                || (ts[offset + 3] & 0x0f) == 0 || hasDiscontinuityIndicator(ts, offset)) {
+            return false;
+        }
+        int previousPesOffset = previousPesStart[packet] * TS_PACKET_BYTES;
+        // A bounded or already-flushed PES cannot carry the seam corruption flag to
+        // an emitted packet. Keep an unbounded video PES buffered until this PUSI.
+        if (offset - previousPesOffset >= FFMPEG_DEFAULT_MAX_PES_PAYLOAD_BYTES
+                || !hasUnboundedVideoPesPayload(ts, previousPesOffset)) return false;
+        int previousOffset = previousPacket[packet] * TS_PACKET_BYTES;
+        int expected = ((ts[previousOffset + 3] & 0x0f) + 1) & 0x0f;
+        return (ts[offset + 3] & 0x0f) == expected;
+    }
+
+    private static int videoPesPayloadOffset(byte[] ts, int offset) throws IOException {
+        if ((ts[offset + 1] & 0x40) == 0) return -1;
+        int payloadOffset = tsPayloadOffset(ts, offset);
+        if (payloadOffset < 0 || payloadOffset + 6 > offset + TS_PACKET_BYTES
+                || ts[payloadOffset] != 0 || ts[payloadOffset + 1] != 0
+                || ts[payloadOffset + 2] != 1) return -1;
+        int streamId = ts[payloadOffset + 3] & 0xff;
+        return streamId >= 0xe0 && streamId <= 0xef ? payloadOffset : -1;
+    }
+
+    private static boolean hasUnboundedVideoPesPayload(byte[] ts, int offset) throws IOException {
+        int payloadOffset = videoPesPayloadOffset(ts, offset);
+        if (payloadOffset < 0 || payloadOffset + 9 > offset + TS_PACKET_BYTES
+                || ts[payloadOffset + 4] != 0 || ts[payloadOffset + 5] != 0
+                || (ts[payloadOffset + 6] & 0xc0) != 0x80) return false;
+        int pesHeaderBytes = 9 + (ts[payloadOffset + 8] & 0xff);
+        return payloadOffset + pesHeaderBytes < offset + TS_PACKET_BYTES;
+    }
+
+    private static void validateTsPacket(byte[] ts, int offset) throws IOException {
+        require(offset >= 0 && offset + TS_PACKET_BYTES <= ts.length,
+                "TS fixture packet is incomplete at offset " + offset);
+        require((ts[offset] & 0xff) == 0x47, "TS fixture lost sync at offset " + offset);
+        require((ts[offset + 1] & 0x80) == 0, "TS fixture has a transport error at offset " + offset);
+        int adaptationControl = (ts[offset + 3] >>> 4) & 0x03;
+        require(adaptationControl != 0, "TS fixture has reserved adaptation-field control at offset " + offset);
+        if ((adaptationControl & 0x02) != 0) {
+            int adaptationLength = ts[offset + 4] & 0xff;
+            require(adaptationControl == 2 ? adaptationLength == 183 : adaptationLength <= 182,
+                    "TS adaptation field does not match its payload control at offset " + offset);
+        }
+    }
+
+    private static int tsPid(byte[] ts, int offset) {
+        return ((ts[offset + 1] & 0x1f) << 8) | (ts[offset + 2] & 0xff);
+    }
+
+    private static int tsPayloadOffset(byte[] ts, int offset) throws IOException {
+        int adaptationControl = (ts[offset + 3] >>> 4) & 0x03;
+        if ((adaptationControl & 0x01) == 0) return -1;
+        if ((adaptationControl & 0x02) == 0) return offset + 4;
+        int payloadOffset = offset + 5 + (ts[offset + 4] & 0xff);
+        require(payloadOffset <= offset + TS_PACKET_BYTES,
+                "TS payload offset overruns packet at offset " + offset);
+        return payloadOffset == offset + TS_PACKET_BYTES ? -1 : payloadOffset;
+    }
+
+    private static boolean hasDiscontinuityIndicator(byte[] ts, int offset) {
+        int adaptationControl = (ts[offset + 3] >>> 4) & 0x03;
+        return (adaptationControl & 0x02) != 0 && (ts[offset + 4] & 0xff) > 0
+                && (ts[offset + 5] & 0x80) != 0;
+    }
+
+    private static void requireResetChangesOnlyContinuityCounters(byte[] continuous, byte[] reset,
+                                                                   int splitBytes) throws IOException {
+        require(continuous.length == reset.length && continuous.length % TS_PACKET_BYTES == 0,
+                "Reset TS fixture changed packet count");
+        boolean changed = false;
+        int[] deltaByPid = new int[TS_NULL_PID + 1];
+        Arrays.fill(deltaByPid, -1);
+        for (int offset = 0; offset < continuous.length; offset += TS_PACKET_BYTES) {
+            validateTsPacket(reset, offset);
+            for (int byteInPacket = 0; byteInPacket < TS_PACKET_BYTES; byteInPacket++) {
+                int index = offset + byteInPacket;
+                if (byteInPacket == 3) {
+                    require((continuous[index] & 0xf0) == (reset[index] & 0xf0),
+                            "Reset TS fixture changed packet-header flags at offset " + index);
+                    if ((continuous[index] & 0x0f) != (reset[index] & 0x0f)) {
+                        require(index >= splitBytes,
+                                "Reset TS fixture changed a first-segment continuity counter");
+                        changed = true;
+                    }
+                    if (offset >= splitBytes) {
+                        int pid = tsPid(continuous, offset);
+                        int continuousCounter = continuous[index] & 0x0f;
+                        int resetCounter = reset[index] & 0x0f;
+                        if (pid == TS_NULL_PID) {
+                            require(continuousCounter == resetCounter,
+                                    "Reset TS fixture changed the null PID continuity counter");
+                        } else {
+                            int delta = (resetCounter - continuousCounter) & 0x0f;
+                            if (deltaByPid[pid] < 0) {
+                                require(resetCounter == 0,
+                                        "Second segment PID did not begin at continuity counter zero: " + pid);
+                                deltaByPid[pid] = delta;
+                            } else {
+                                require(deltaByPid[pid] == delta,
+                                        "Second segment PID did not retain a constant continuity offset: " + pid);
+                            }
+                        }
+                    }
+                } else {
+                    require(continuous[index] == reset[index],
+                            "Reset TS fixture changed non-counter byte at offset " + index);
+                }
+            }
+        }
+        require(changed, "Reset TS fixture did not change any continuity counter");
+    }
+
+    private static byte[] readFile(File file) throws IOException {
+        try (FileInputStream input = new FileInputStream(file);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            return output.toByteArray();
+        }
+    }
+
+    private static void writeFile(File file, byte[] bytes) throws IOException {
+        try (FileOutputStream output = new FileOutputStream(file)) {
+            output.write(bytes);
+        }
+    }
+
+    private static final class ResetFixture {
+        private final byte[] flattened;
+        private final int splitBytes;
+
+        private ResetFixture(byte[] flattened, int splitBytes) {
+            this.flattened = flattened;
+            this.splitBytes = splitBytes;
+        }
     }
 
     private static byte[] pngPrefix(int length) {
@@ -268,6 +488,20 @@ public final class SmokeActivity extends Activity {
     }
 
     private String run(File executable, String... arguments) throws Exception {
+        ProcessResult result = execute(executable, arguments);
+        require(result.exit == 0, "Command failed (" + result.exit + "): "
+                + executable + " " + Arrays.toString(arguments) + "\n" + result.output);
+        return result.output;
+    }
+
+    private String runExpectingFailure(File executable, String... arguments) throws Exception {
+        ProcessResult result = execute(executable, arguments);
+        require(result.exit != 0, "Command unexpectedly succeeded: "
+                + executable + " " + Arrays.toString(arguments) + "\n" + result.output);
+        return result.output;
+    }
+
+    private ProcessResult execute(File executable, String... arguments) throws Exception {
         List<String> command = new ArrayList<>();
         command.add(executable.getAbsolutePath());
         command.addAll(Arrays.asList(arguments));
@@ -306,10 +540,19 @@ public final class SmokeActivity extends Activity {
             require(!logger.isAlive(), "Process output stream did not close: " + command);
             if (loggingError.get() != null) throw new IOException("Cannot capture process output", loggingError.get());
             String output = readLog(log);
-            require(exit == 0, "Command failed (" + exit + "): " + command + "\n" + output);
-            return output;
+            return new ProcessResult(exit, output);
         } finally {
             process.destroy();
+        }
+    }
+
+    private static final class ProcessResult {
+        private final int exit;
+        private final String output;
+
+        private ProcessResult(int exit, String output) {
+            this.exit = exit;
+            this.output = output;
         }
     }
 
